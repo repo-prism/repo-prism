@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoSnapshot {
     pub path: PathBuf,
     pub head: HeadInfo,
@@ -10,7 +10,7 @@ pub struct RepoSnapshot {
     pub status: StatusInfo,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeadInfo {
     pub branch: Option<String>,
     pub commit: String,
@@ -18,40 +18,40 @@ pub struct HeadInfo {
     pub upstream: Option<UpstreamInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamInfo {
     pub name: String,
     pub ahead: u32,
     pub behind: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
     pub commit: String,
     pub is_current: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TagInfo {
     pub name: String,
     pub commit: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StatusInfo {
     pub conflicts: Vec<FileChange>,
     pub staged: Vec<FileChange>,
     pub unstaged: Vec<FileChange>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileChange {
     pub path: String,
     pub kind: ChangeKind,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Added,
@@ -64,7 +64,7 @@ pub enum ChangeKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub sha: String,
     pub short_sha: String,

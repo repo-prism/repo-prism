@@ -8,7 +8,7 @@
 mod common;
 
 use common::TempRepo;
-use repo_prism_core::{ChangeKind, Git};
+use repo_prism_core::{ChangeKind, FileChange, Git};
 
 #[test]
 fn snapshot_reads_head_branches_tags_and_clean_status() {
@@ -118,7 +118,7 @@ fn status_groups_staged_unstaged_and_untracked() {
         .iter()
         .find(|f| f.path == "tracked.txt")
         .expect("tracked.txt 应在 unstaged");
-    assert!(matches!(modified.kind, ChangeKind::Modified));
+    assert_eq!(modified.kind, ChangeKind::Modified);
 }
 
 #[test]
@@ -272,6 +272,35 @@ fn commits_captures_body() {
     assert_eq!(commits.len(), 1);
     assert_eq!(commits[0].subject, "subject line");
     assert_eq!(commits[0].body.as_deref(), Some("body line"));
+}
+
+#[test]
+fn model_types_are_comparable() {
+    // 公开类型需可比较，调用方与测试才能直接断言，而不必退化为 matches!
+    let a = FileChange {
+        path: "a.txt".to_string(),
+        kind: ChangeKind::Modified,
+    };
+    let b = FileChange {
+        path: "a.txt".to_string(),
+        kind: ChangeKind::Modified,
+    };
+    assert_eq!(a, b);
+    assert_ne!(a.kind, ChangeKind::Added);
+}
+
+#[test]
+fn snapshot_is_stable_across_repeated_reads() {
+    let repo = TempRepo::new("stable");
+    repo.write("a.txt", "1\n");
+    repo.commit_at("c1", "2026-01-01T00:00:00+08:00");
+
+    let git = Git::open(repo.path()).expect("open repo");
+    let first = git.snapshot().expect("first snapshot");
+    let second = git.snapshot().expect("second snapshot");
+
+    // 仓库未变动时，两次读取的结果必须一致
+    assert_eq!(first, second);
 }
 
 #[test]
