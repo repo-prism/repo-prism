@@ -11,21 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 先自检扫描器本身（正例不误报、反例能检出），再扫描真实代码。
+      # 旧实现只检查与 Command::new 同一行的内容，对跨行的链式 .arg()
+      # 和数组字面量里的命令完全无效，是假绿灯。详见脚本内注释。
+      - name: Self-test the guard
+        run: bash scripts/read-only-guard.sh --self-test
       - name: Scan for forbidden Git commands
-        run: |
-          set -e
-          if [ ! -d crates/repo-prism-core/src ]; then
-            echo "core crate not yet created, skipping"
-            exit 0
-          fi
-          ALLOWED='status|log|show|diff|cat-file|rev-parse|for-each-ref|branch|tag|remote|config|ls-files|ls-tree|rev-list|symbolic-ref|merge-base|describe|shortlog|blame|worktree|stash'
-          if grep -rn 'Command::new("git")' crates/repo-prism-core/src/ \
-             | grep -oE 'arg\("[a-z-]+"\)' \
-             | grep -vE "\"($ALLOWED)\""; then
-            echo "ERROR: forbidden Git command detected"
-            exit 1
-          fi
-          echo "Read-only guard passed"
+        run: bash scripts/read-only-guard.sh
 
   rust:
     name: Rust
