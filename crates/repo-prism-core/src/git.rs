@@ -16,7 +16,8 @@ impl Git {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let out = Command::new("git")
-            .arg("-C").arg(path)
+            .arg("-C")
+            .arg(path)
             .arg("rev-parse")
             .arg("--show-toplevel")
             .output()
@@ -123,7 +124,12 @@ impl Git {
             .run(&["rev-parse", "HEAD"])?
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        Ok(HeadInfo { branch, commit, detached, upstream: None })
+        Ok(HeadInfo {
+            branch,
+            commit,
+            detached,
+            upstream: None,
+        })
     }
 
     fn branches(&self) -> Result<Vec<BranchInfo>> {
@@ -140,7 +146,11 @@ impl Git {
                 let commit = parts.next().unwrap_or("").to_string();
                 let is_current = parts.next().unwrap_or("") == "*";
                 if !name.is_empty() {
-                    result.push(BranchInfo { name, commit, is_current });
+                    result.push(BranchInfo {
+                        name,
+                        commit,
+                        is_current,
+                    });
                 }
             }
         }
@@ -241,7 +251,8 @@ impl Git {
     /// 只读执行 Git 命令。返回 `None` 表示命令失败但不致命。
     fn run(&self, args: &[&str]) -> Result<Option<String>> {
         let out = Command::new("git")
-            .arg("-C").arg(&self.repo)
+            .arg("-C")
+            .arg(&self.repo)
             .args(args)
             .output()
             .with_context(|| format!("failed to run git {:?}", args))?;
