@@ -74,7 +74,9 @@ export const LANE_COLORS = [
 ];
 
 export function laneColor(lane: number): string {
-  return LANE_COLORS[lane % LANE_COLORS.length];
+  // 双重取模：保证负 lane 也落在合法下标上，避免返回 undefined
+  const count = LANE_COLORS.length;
+  return LANE_COLORS[((lane % count) + count) % count];
 }
 
 export function maxLaneOf(commits: GraphCommit[]): number {
