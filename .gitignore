@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Rust / Cargo 构建产物
+/target
+**/target
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
