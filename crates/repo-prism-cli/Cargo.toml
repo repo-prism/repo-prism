@@ -1,0 +1,16 @@
+[package]
+name = "repo-prism-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "repoprism"
+path = "src/main.rs"
+
+[dependencies]
+repo-prism-core = { path = "../repo-prism-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json.workspace = true
+anyhow.workspace = true

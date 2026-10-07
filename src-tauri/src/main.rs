@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    repo_prism_app_lib::run()
+    repo_prism_lib::run()
 }

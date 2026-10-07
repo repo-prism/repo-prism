@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "repo-prism-app",
+  "productName": "repoprism-app",
   "version": "0.1.0",
   "identifier": "repoprism.yunlou.net.cn",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "repo-prism-app",
+        "title": "repoprism-app",
         "width": 800,
         "height": 600
       }

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  read-only-guard:
+    name: Read-only Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for forbidden Git commands
+        run: |
+          set -e
+          if [ ! -d crates/repo-prism-core/src ]; then
+            echo "core crate not yet created, skipping"
+            exit 0
+          fi
+          ALLOWED='status|log|show|diff|cat-file|rev-parse|for-each-ref|branch|tag|remote|config|ls-files|ls-tree|rev-list|symbolic-ref|merge-base|describe|shortlog|blame|worktree|stash'
+          if grep -rn 'Command::new("git")' crates/repo-prism-core/src/ \
+             | grep -oE 'arg\("[a-z-]+"\)' \
+             | grep -vE "\"($ALLOWED)\""; then
+            echo "ERROR: forbidden Git command detected"
+            exit 1
+          fi
+          echo "Read-only guard passed"
+
+  rust:
+    name: Rust
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: test
+        run: cargo test --workspace
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
