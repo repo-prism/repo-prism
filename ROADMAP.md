@@ -91,7 +91,7 @@
 | 前端构建 | `vite build` | ✅ `dist/assets/index-qz-52nYw.js` 244.43 kB（gzip 76.49 kB） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.2.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
-| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>重算方式：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（此前本行写的「四次」「五次」是**少算**——当时已绿的运行里漏掉了两次文档提交。） |
+| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
 **core 104 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
