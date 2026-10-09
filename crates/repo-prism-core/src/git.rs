@@ -1,8 +1,17 @@
+use crate::diffparse::{parse_name_status, parse_patch};
 use crate::model::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// `git log` 的字段格式：`\x1f` 分隔字段、`\x1e` 分隔记录，
+/// 避免提交信息中的换行、制表符、`|` 等字符造成解析歧义。
+const COMMIT_FORMAT: &str =
+    "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cn\x1f%ce\x1f%cI\x1f%s\x1f%b\x1e";
+
+/// 单次 Diff 解析的行数上限。超出即截断并**显式标注**，不静默丢弃。
+const MAX_DIFF_LINES: usize = 5_000;
 
 /// Git 只读读取器。
 ///
@@ -34,62 +43,146 @@ impl Git {
     }
 
     pub fn snapshot(&self) -> Result<RepoSnapshot> {
+        // 上游计数与工作区状态来自同一次 `git status` 调用，不额外起子进程。
+        let (status, upstream) = self.status()?;
         Ok(RepoSnapshot {
             path: self.repo.clone(),
-            head: self.head()?,
+            head: self.head(upstream)?,
             branches: self.branches()?,
             tags: self.tags()?,
-            status: self.status()?,
+            status,
         })
     }
 
     /// 读取提交图。
-    ///
-    /// 使用 `\x1f` 分隔字段、`\x1e` 分隔记录，避免提交信息中的
-    /// 换行、制表符、| 等字符造成解析歧义。
     pub fn commits(&self, limit: usize, skip: usize) -> Result<Vec<CommitInfo>> {
-        let format = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cn\x1f%ce\x1f%cI\x1f%s\x1f%b\x1e";
         let n = format!("-n{}", limit);
         let s = format!("--skip={}", skip);
-        let fmt = format!("--format={}", format);
+        let fmt = format!("--format={}", COMMIT_FORMAT);
         let out = self.run(&["log", "--all", "--date=iso-strict", &fmt, &n, &s])?;
 
         let refs = self.ref_map()?;
-        let mut commits = Vec::new();
+        Ok(Self::parse_commits(out.as_deref().unwrap_or(""), &refs))
+    }
 
-        if let Some(out) = out {
-            for record in out.split('\x1e') {
-                let record = record.trim_matches('\n');
-                if record.is_empty() {
-                    continue;
-                }
-                let parts: Vec<&str> = record.split('\x1f').collect();
-                if parts.len() < 11 {
-                    continue;
-                }
-                let sha = parts[0].to_string();
-                commits.push(CommitInfo {
-                    short_sha: parts[1].to_string(),
-                    parents: parts[2].split_whitespace().map(String::from).collect(),
-                    author_name: parts[3].to_string(),
-                    author_email: parts[4].to_string(),
-                    author_date: parts[5].to_string(),
-                    committer_name: parts[6].to_string(),
-                    committer_email: parts[7].to_string(),
-                    committer_date: parts[8].to_string(),
-                    subject: parts[9].to_string(),
-                    body: if parts[10].trim().is_empty() {
-                        None
-                    } else {
-                        Some(parts[10].trim().to_string())
-                    },
-                    refs: refs.get(&sha).cloned().unwrap_or_default(),
-                    sha,
-                });
+    /// 读取单个提交的元信息。
+    pub fn commit(&self, sha: &str) -> Result<CommitInfo> {
+        let fmt = format!("--format={}", COMMIT_FORMAT);
+        let out = self.run(&["log", "--max-count=1", "--date=iso-strict", &fmt, sha])?;
+        let refs = self.ref_map()?;
+        Self::parse_commits(out.as_deref().unwrap_or(""), &refs)
+            .into_iter()
+            .next()
+            .with_context(|| format!("commit not found: {sha}"))
+    }
+
+    fn parse_commits(raw: &str, refs: &HashMap<String, Vec<String>>) -> Vec<CommitInfo> {
+        let mut commits = Vec::new();
+        for record in raw.split('\x1e') {
+            let record = record.trim_matches('\n');
+            if record.is_empty() {
+                continue;
             }
+            let parts: Vec<&str> = record.split('\x1f').collect();
+            if parts.len() < 11 {
+                continue;
+            }
+            let sha = parts[0].to_string();
+            commits.push(CommitInfo {
+                short_sha: parts[1].to_string(),
+                parents: parts[2].split_whitespace().map(String::from).collect(),
+                author_name: parts[3].to_string(),
+                author_email: parts[4].to_string(),
+                author_date: parts[5].to_string(),
+                committer_name: parts[6].to_string(),
+                committer_email: parts[7].to_string(),
+                committer_date: parts[8].to_string(),
+                subject: parts[9].to_string(),
+                body: if parts[10].trim().is_empty() {
+                    None
+                } else {
+                    Some(parts[10].trim().to_string())
+                },
+                refs: refs.get(&sha).cloned().unwrap_or_default(),
+                sha,
+            });
+        }
+        commits
+    }
+
+    /// 提交详情：元信息 + 变更文件清单（US-3）。
+    pub fn commit_detail(&self, sha: &str) -> Result<CommitDetail> {
+        let commit = self.commit(sha)?;
+        let diff = self.commit_diff(sha)?;
+        let files = diff
+            .files
+            .into_iter()
+            .map(|file| FileStat {
+                path: file.path,
+                old_path: file.old_path,
+                kind: file.kind,
+                additions: file.additions,
+                deletions: file.deletions,
+                binary: file.binary,
+            })
+            .collect();
+        Ok(CommitDetail { commit, files })
+    }
+
+    /// 单个提交的 Diff（US-3）。
+    pub fn commit_diff(&self, sha: &str) -> Result<Diff> {
+        // `--format=` 清空提交信息头，只留 diff 正文。
+        let names = [
+            "show",
+            "--format=",
+            "--name-status",
+            "--find-renames",
+            "-z",
+            sha,
+        ];
+        let patch = [
+            "show",
+            "--format=",
+            "--find-renames",
+            "--no-textconv",
+            "--unified=3",
+            sha,
+        ];
+        self.collect_diff(&names, &patch)
+    }
+
+    /// 任意两点之间的 Diff。
+    ///
+    /// `from` / `to` 都为空时是「工作区 vs 索引」；只给 `from` 是「工作区 vs from」。
+    pub fn diff(&self, from: Option<&str>, to: Option<&str>) -> Result<Diff> {
+        let mut locate: Vec<&str> = Vec::new();
+        if let Some(from) = from {
+            locate.push(from);
+        }
+        if let Some(to) = to {
+            locate.push(to);
         }
 
-        Ok(commits)
+        let mut names = vec!["diff", "--name-status", "--find-renames", "-z"];
+        names.extend_from_slice(&locate);
+        let mut patch = vec!["diff", "--find-renames", "--no-textconv", "--unified=3"];
+        patch.extend_from_slice(&locate);
+
+        self.collect_diff(&names, &patch)
+    }
+
+    /// 两次调用读同一个 diff：`--name-status -z` 给可靠的路径与类型，
+    /// patch 正文给 hunk 内容。两者由 Git 按同一顺序生成，按下标对齐。
+    ///
+    /// `--no-textconv` 是安全要求而非性能优化：不加它，Git 会对声明了
+    /// textconv 的文件执行仓库自定义的转换器（SECURITY.md 威胁 1）。
+    fn collect_diff(&self, names_args: &[&str], patch_args: &[&str]) -> Result<Diff> {
+        let names_raw = self.run(names_args)?.unwrap_or_default();
+        let patch = self.run(patch_args)?.unwrap_or_default();
+
+        let names = parse_name_status(&names_raw);
+        let (files, truncated) = parse_patch(&patch, &names, MAX_DIFF_LINES);
+        Ok(Diff { files, truncated })
     }
 
     fn ref_map(&self) -> Result<HashMap<String, Vec<String>>> {
@@ -114,7 +207,7 @@ impl Git {
         Ok(map)
     }
 
-    fn head(&self) -> Result<HeadInfo> {
+    fn head(&self, upstream: Option<UpstreamInfo>) -> Result<HeadInfo> {
         let symbolic = self.run(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
         let (branch, detached) = match symbolic {
             Some(s) if !s.trim().is_empty() => (Some(s.trim().to_string()), false),
@@ -128,7 +221,7 @@ impl Git {
             branch,
             commit,
             detached,
-            upstream: None,
+            upstream,
         })
     }
 
@@ -180,12 +273,33 @@ impl Git {
     /// 解析 `git status --porcelain=v2 --branch -z`。
     ///
     /// `-z` 使用 NUL 分隔条目，可安全处理路径中的空格与引号。
-    fn status(&self) -> Result<StatusInfo> {
+    ///
+    /// 输出流由三部分组成：一组 `# branch.*` 头部行（`--branch` 开启后才有）、
+    /// 工作区条目、以及未跟踪条目。每条记录都以 NUL 结尾，头部行也是——
+    /// 因此不需要按换行切分，路径中含换行符也不会破坏解析。
+    ///
+    /// **上游计数就藏在头部里**（`# branch.upstream <ref>` / `# branch.ab +N -M`），
+    /// 所以顺带一并返回，避免再起一个 `rev-list --count` 子进程。
+    fn status(&self) -> Result<(StatusInfo, Option<UpstreamInfo>)> {
         let out = self.run(&["status", "--porcelain=v2", "--branch", "-z"])?;
         let mut info = StatusInfo::default();
+        let mut upstream_name: Option<String> = None;
+        let mut ahead_behind: Option<(u32, u32)> = None;
+
         if let Some(out) = out {
             for entry in out.split('\0') {
-                if entry.is_empty() || entry.starts_with("# ") {
+                if entry.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = entry.strip_prefix("# branch.upstream ") {
+                    upstream_name = Some(rest.trim().to_string());
+                    continue;
+                }
+                if let Some(rest) = entry.strip_prefix("# branch.ab ") {
+                    ahead_behind = parse_ahead_behind(rest);
+                    continue;
+                }
+                if entry.starts_with("# ") {
                     continue;
                 }
                 match entry.chars().next() {
@@ -227,7 +341,23 @@ impl Git {
                 }
             }
         }
-        Ok(info)
+
+        // 未设置上游时 git 根本不输出 `# branch.upstream`，此时必须是 `None`，
+        // 而不是「ahead=0, behind=0」——后者会让「本地领先/落后为 0」与
+        // 「没有上游可比」这两种完全不同的状态混为一谈。
+        //
+        // 若用户设置了 `status.aheadBehind=false`，git 只给 upstream 名不给计数，
+        // 此时按 0/0 处理（此时计数确实未知，而非同步）。
+        let upstream = upstream_name.map(|name| {
+            let (ahead, behind) = ahead_behind.unwrap_or((0, 0));
+            UpstreamInfo {
+                name,
+                ahead,
+                behind,
+            }
+        });
+
+        Ok((info, upstream))
     }
 
     fn classify(info: &mut StatusInfo, xy: &str, path: &str) {
@@ -237,13 +367,13 @@ impl Git {
         if x != '.' && x != ' ' {
             info.staged.push(FileChange {
                 path: path.to_string(),
-                kind: parse_kind(x),
+                kind: ChangeKind::from_status_code(x),
             });
         }
         if y != '.' && y != ' ' {
             info.unstaged.push(FileChange {
                 path: path.to_string(),
-                kind: parse_kind(y),
+                kind: ChangeKind::from_status_code(y),
             });
         }
     }
@@ -263,15 +393,34 @@ impl Git {
     }
 }
 
-fn parse_kind(c: char) -> ChangeKind {
-    match c {
-        'A' => ChangeKind::Added,
-        'M' => ChangeKind::Modified,
-        'D' => ChangeKind::Deleted,
-        'R' => ChangeKind::Renamed,
-        'C' => ChangeKind::Copied,
-        'T' => ChangeKind::TypeChanged,
-        'U' => ChangeKind::Unmerged,
-        _ => ChangeKind::Unknown,
+/// 解析 `# branch.ab` 的值，形如 `+2 -0`。
+///
+/// `+` 是领先上游的提交数，`-` 是落后上游的提交数。格式不符时返回 `None`，
+/// 由调用方决定退化为「计数未知」还是报错。
+fn parse_ahead_behind(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.split_whitespace();
+    let ahead = parts.next()?.strip_prefix('+')?.parse().ok()?;
+    let behind = parts.next()?.strip_prefix('-')?.parse().ok()?;
+    Some((ahead, behind))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ahead_behind;
+
+    // 注意：本模块位于 core/src 下，会被 read-only guard 扫描，
+    // 因此断言里的字面量只使用非「纯小写单词」形式。
+    #[test]
+    fn parses_branch_ab_counts() {
+        assert_eq!(parse_ahead_behind("+2 -0"), Some((2, 0)));
+        assert_eq!(parse_ahead_behind("+0 -3"), Some((0, 3)));
+        assert_eq!(parse_ahead_behind("+0 -0"), Some((0, 0)));
+    }
+
+    #[test]
+    fn rejects_malformed_branch_ab() {
+        assert_eq!(parse_ahead_behind(""), None);
+        assert_eq!(parse_ahead_behind("2 0"), None);
+        assert_eq!(parse_ahead_behind("+2"), None);
     }
 }

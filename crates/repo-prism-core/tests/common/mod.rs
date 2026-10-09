@@ -8,6 +8,11 @@
 //!
 //! 产品代码侧的约束以 `AGENTS.md` 为准：`src/` 下只允许白名单内的只读命令，
 //! 且 CI 的 read-only guard 静态扫描只覆盖 `crates/repo-prism-core/src/`。
+//!
+//! 本模块被多个集成测试二进制共用（snapshot / perf / …），每个二进制只用到其中
+//! 一部分辅助方法。Rust 会按二进制分别判定 `dead_code`，于是必然出现
+//! 「另一个测试用得到」的误报，故在此统一关闭该项。
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::PathBuf;
@@ -17,6 +22,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// 生成一个进程内唯一的临时目录路径并创建它。
+fn temp_path(tag: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("repoprism-{tag}-{nanos}-{seq}"));
+    fs::create_dir_all(&path).expect("failed to create temp dir");
+    path
+}
+
 /// 临时仓库。离开作用域时自动删除。
 pub struct TempRepo {
     path: PathBuf,
@@ -24,21 +41,33 @@ pub struct TempRepo {
 
 impl TempRepo {
     pub fn new(tag: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock before UNIX epoch")
-            .as_nanos();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("repoprism-{tag}-{nanos}-{seq}"));
-        fs::create_dir_all(&path).expect("failed to create temp dir");
-
-        let repo = Self { path };
+        let repo = Self {
+            path: temp_path(tag),
+        };
         repo.git(&["init"]);
         repo.git(&["config", "user.name", "Test User"]);
         repo.git(&["config", "user.email", "test@example.com"]);
         repo.git(&["config", "commit.gpgsign", "false"]);
         repo.git(&["config", "tag.gpgsign", "false"]);
         repo
+    }
+
+    /// 构造一个 bare 仓库，用作本地 upstream 的替身。
+    ///
+    /// 全程使用本地路径，不涉及网络与凭据，因此可在 CI 离线运行。
+    pub fn new_bare(tag: &str) -> Self {
+        let repo = Self {
+            path: temp_path(tag),
+        };
+        repo.git(&["init", "--bare"]);
+        repo
+    }
+
+    /// 添加名为 `origin` 的 remote 并推送 `branch`，建立上游跟踪关系。
+    pub fn add_upstream(&self, remote: &TempRepo, branch: &str) {
+        let url = remote.path().to_string_lossy().to_string();
+        self.git(&["remote", "add", "origin", &url]);
+        self.git(&["push", "-u", "origin", branch]);
     }
 
     pub fn path(&self) -> &std::path::Path {
@@ -132,6 +161,83 @@ impl TempRepo {
 
     pub fn head_sha(&self) -> String {
         self.git(&["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    /// 以 stdin 送入数据执行 git 命令。
+    ///
+    /// 用于 `git fast-import`：一条进程构造成千上万条提交，
+    /// 比循环调用 `git commit` 快两个数量级（后者每条提交都要 fork 一次）。
+    pub fn git_stdin(&self, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .args(["-c", "init.defaultBranch=main", "-C"])
+            .arg(&self.path)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn git");
+
+        child
+            .stdin
+            .as_mut()
+            .expect("piped stdin")
+            .write_all(input.as_bytes())
+            .expect("failed to write to git stdin");
+
+        let out = child.wait_with_output().expect("failed to wait for git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// 用 `git fast-import` 灌入 `commits` 条线性历史到 `refs/heads/main`。
+    ///
+    /// 仅用于性能基准构造输入；不更新工作区，因此灌完后 `status` 会显示
+    /// `f.txt` 被删除——这不影响对 `snapshot()` / `commits()` 耗时的度量。
+    pub fn seed_fast_import(&self, commits: usize) {
+        let mut stream = String::new();
+        let mut mark = 0usize;
+        let mut prev_commit: Option<usize> = None;
+
+        for i in 0..commits {
+            mark += 1;
+            let blob_mark = mark;
+            let content = format!("v{i}\n");
+            stream.push_str(&format!(
+                "blob\nmark :{blob_mark}\ndata {}\n{}\n",
+                content.len(),
+                content
+            ));
+
+            mark += 1;
+            let commit_mark = mark;
+            let message = format!("commit {i}\n");
+            let when = 1_700_000_000 + i;
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{commit_mark}\n\
+                 author Test User <test@example.com> {when} +0800\n\
+                 committer Test User <test@example.com> {when} +0800\n"
+            ));
+            stream.push_str(&format!("data {}\n{}\n", message.len(), message));
+            if let Some(prev) = prev_commit {
+                stream.push_str(&format!("from :{prev}\n"));
+            }
+            stream.push_str(&format!("M 100644 :{blob_mark} f.txt\n\n"));
+
+            prev_commit = Some(commit_mark);
+        }
+
+        self.git_stdin(&["fast-import", "--quiet"], &stream);
     }
 }
 

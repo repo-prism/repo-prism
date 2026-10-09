@@ -1,4 +1,5 @@
 import type { FileChange, StatusInfo } from "../lib/api";
+import { kindLabel, kindText } from "../lib/kinds";
 
 interface Props {
   status: StatusInfo;
@@ -30,32 +31,13 @@ function ChangeGroup({ title, files, tone }: { title: string; files: FileChange[
       <ul>
         {files.map((f) => (
           <li key={`${tone}-${f.path}`}>
-            <span className={`kind kind-${f.kind}`}>{kindLabel(f.kind)}</span>
+            <span className={`kind kind-${f.kind}`} title={kindText(f.kind)}>
+              {kindLabel(f.kind)}
+            </span>
             <span className="path">{f.path}</span>
           </li>
         ))}
       </ul>
     </div>
   );
-}
-
-function kindLabel(kind: string): string {
-  switch (kind) {
-    case "added":
-      return "A";
-    case "modified":
-      return "M";
-    case "deleted":
-      return "D";
-    case "renamed":
-      return "R";
-    case "copied":
-      return "C";
-    case "type_changed":
-      return "T";
-    case "unmerged":
-      return "U";
-    default:
-      return "?";
-  }
 }

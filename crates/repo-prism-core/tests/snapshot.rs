@@ -303,6 +303,132 @@ fn snapshot_is_stable_across_repeated_reads() {
     assert_eq!(first, second);
 }
 
+// ---------------------------------------------------------------------------
+// 上游跟踪（TASK-008）
+//
+// `head.upstream` 的数据来自 `git status --porcelain=v2 --branch` 的
+// `# branch.upstream` / `# branch.ab` 头部，与工作区状态共用同一次调用。
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upstream_is_none_without_remote() {
+    let repo = TempRepo::new("up-none");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+
+    let snap = Git::open(repo.path())
+        .expect("open repo")
+        .snapshot()
+        .unwrap();
+
+    assert!(
+        snap.head.upstream.is_none(),
+        "无上游的分支必须返回 None，而不是 ahead=0/behind=0，实际 {:?}",
+        snap.head.upstream
+    );
+}
+
+#[test]
+fn upstream_reports_in_sync() {
+    let repo = TempRepo::new("up-sync");
+    let remote = TempRepo::new_bare("up-sync-remote");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+    repo.add_upstream(&remote, "main");
+
+    let snap = Git::open(repo.path())
+        .expect("open repo")
+        .snapshot()
+        .unwrap();
+    let upstream = snap.head.upstream.expect("应识别出上游");
+
+    assert_eq!(upstream.name, "origin/main");
+    assert_eq!(upstream.ahead, 0);
+    assert_eq!(upstream.behind, 0);
+}
+
+#[test]
+fn upstream_reports_ahead() {
+    let repo = TempRepo::new("up-ahead");
+    let remote = TempRepo::new_bare("up-ahead-remote");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+    repo.add_upstream(&remote, "main");
+
+    // 本地再提交两次但不推送 → 领先 2
+    for i in 2..=3 {
+        repo.write("a.txt", &format!("{i}\n"));
+        repo.commit(&format!("local {i}"));
+    }
+
+    let snap = Git::open(repo.path())
+        .expect("open repo")
+        .snapshot()
+        .unwrap();
+    let upstream = snap.head.upstream.expect("应识别出上游");
+
+    assert_eq!(upstream.name, "origin/main");
+    assert_eq!(upstream.ahead, 2);
+    assert_eq!(upstream.behind, 0);
+}
+
+#[test]
+fn upstream_reports_behind() {
+    let repo = TempRepo::new("up-behind");
+    let remote = TempRepo::new_bare("up-behind-remote");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+    repo.add_upstream(&remote, "main");
+
+    // 再提交三次并推送，然后把本地回退到三个提交之前 → 落后 3
+    for i in 2..=4 {
+        repo.write("a.txt", &format!("{i}\n"));
+        repo.commit(&format!("c{i}"));
+    }
+    repo.git(&["push", "origin", "main"]);
+    repo.git(&["reset", "--hard", "HEAD~3"]);
+
+    let snap = Git::open(repo.path())
+        .expect("open repo")
+        .snapshot()
+        .unwrap();
+    let upstream = snap.head.upstream.expect("应识别出上游");
+
+    assert_eq!(upstream.name, "origin/main");
+    assert_eq!(upstream.ahead, 0);
+    assert_eq!(upstream.behind, 3);
+}
+
+#[test]
+fn upstream_coexists_with_working_tree_changes() {
+    let repo = TempRepo::new("up-dirty");
+    let remote = TempRepo::new_bare("up-dirty-remote");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+    repo.add_upstream(&remote, "main");
+    repo.write("a.txt", "changed\n");
+    repo.write("new.txt", "new\n");
+
+    let snap = Git::open(repo.path())
+        .expect("open repo")
+        .snapshot()
+        .unwrap();
+
+    // 同一份 status 输出里既有工作区条目也有上游头部，两者必须都解析正确
+    let paths: Vec<&str> = snap
+        .status
+        .unstaged
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert!(paths.contains(&"a.txt"), "unstaged={paths:?}");
+    assert!(paths.contains(&"new.txt"), "unstaged={paths:?}");
+    assert_eq!(
+        snap.head.upstream.expect("应识别出上游").name,
+        "origin/main"
+    );
+}
+
 #[test]
 fn open_rejects_non_repository() {
     let dir = std::env::temp_dir();

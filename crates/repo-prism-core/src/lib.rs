@@ -6,5 +6,7 @@
 pub mod git;
 pub mod model;
 
+mod diffparse;
+
 pub use git::Git;
 pub use model::*;

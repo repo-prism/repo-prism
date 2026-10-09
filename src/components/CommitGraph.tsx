@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { CommitInfo } from "../lib/api";
+import { formatRelativeDate } from "../lib/format";
 import { assignLanes, laneColor, maxLaneOf } from "../lib/graph";
 
 const LANE_WIDTH = 16;
@@ -7,6 +8,9 @@ const ROW_HEIGHT = 48;
 
 interface Props {
   commits: CommitInfo[];
+  /** 当前选中的提交；为 null 时无选中态。 */
+  selectedSha: string | null;
+  onSelect: (sha: string) => void;
 }
 
 interface LaneBackground {
@@ -15,7 +19,7 @@ interface LaneBackground {
   color: string;
 }
 
-export function CommitGraph({ commits }: Props) {
+export function CommitGraph({ commits, selectedSha, onSelect }: Props) {
   const graph = useMemo(() => assignLanes(commits), [commits]);
   const maxLane = useMemo(() => maxLaneOf(graph), [graph]);
   const graphWidth = Math.max((maxLane + 1) * LANE_WIDTH, LANE_WIDTH * 3);
@@ -48,7 +52,13 @@ export function CommitGraph({ commits }: Props) {
       </div>
       <div className="commit-list">
         {graph.map((commit) => (
-          <div key={commit.sha} className="commit-row">
+          <button
+            type="button"
+            key={commit.sha}
+            className={`commit-row${selectedSha === commit.sha ? " selected" : ""}`}
+            aria-pressed={selectedSha === commit.sha}
+            onClick={() => onSelect(commit.sha)}
+          >
             <svg
               width={graphWidth}
               height={ROW_HEIGHT}
@@ -121,27 +131,12 @@ export function CommitGraph({ commits }: Props) {
               <div className="commit-meta">
                 <code>{commit.short_sha}</code>
                 <span>{commit.author_name}</span>
-                <span>{formatDate(commit.author_date)}</span>
+                <span>{formatRelativeDate(commit.author_date)}</span>
               </div>
             </div>
-          </div>
+          </button>
         ))}
       </div>
     </div>
   );
-}
-
-function formatDate(iso: string): string {
-  try {
-    const d = new Date(iso);
-    const now = Date.now();
-    const diff = now - d.getTime();
-    const day = 86_400_000;
-    if (diff < day) return "今天";
-    if (diff < 2 * day) return "昨天";
-    if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-    return d.toLocaleDateString("zh-CN");
-  } catch {
-    return iso;
-  }
 }
