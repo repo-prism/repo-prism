@@ -20,6 +20,12 @@
     `# branch.head` / `# branch.oid` 头部行取，省掉 `symbolic-ref` 与 `rev-parse HEAD`
   - **行为逐字保持不变**：既有 16 个 `snapshot` 集成测试（含分离头指针、无提交仓库、
     上游 ahead/behind）全部通过
+- **本地模型请求显式不使用环境代理**（P-08）：`summarizer.rs` 不再调用
+  `ureq::get` / `ureq::post` 这两个顶层便捷函数（它们构造的是默认 agent，
+  从调用处**看不出作者有没有考虑过代理**），改为 `local_agent()` 显式构造，
+  且**刻意不调用** `AgentBuilder::proxy_from_env()`。
+  运行时行为不变（实测 ureq 2.12.1 的默认 agent 本就不改道回环请求），
+  但这条安全要求现在写进了代码并被测试钉住，而不是依赖某个库版本的默认值。
 
 ### Added
 
@@ -40,6 +46,24 @@
   - 断言请求的方法、路径、`Content-Type`，并把请求体反序列化后逐字段核对
     （`model` / `stream: false` / `prompt` / `options.temperature`）
   - 「出网 body 只含相对路径」这条不变式改由**读请求体**直接断言
+- **与 Ollama 官方 API 文档的字段契约核对**（工程补丁 P-08，
+  `crates/repo-prism-core/tests/summarizer_contract.rs`）
+  - 输入**逐字取自**官方 `docs/api.md` 的响应示例，而不是我们自己编写 ——
+    这是 P-07 无法覆盖的盲区：响应形状自编时，字段名写错会**两边一起错**、测试照样绿
+  - 覆盖 `generate` 的 `response` 与非流式全字段（`context` / `total_duration` /
+    `eval_count`…）、`list_models` 的 `models[].name` 与嵌套 `details`
+  - 含一条反向用例：字段名不是 `response` 时必须取不到正文，**证明上一条断言真的在核对字段名**
+  - 多行 NDJSON 必须整体判为失败，而不是截取第一行当摘要
+- **本地模型出网边界：环境代理不得改道回环请求**（工程补丁 P-08，
+  `crates/repo-prism-core/tests/summarizer_egress.rs`）
+  - `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 会**改写连接目标**：一旦被遵循，
+    endpoint 上写着的回环地址就不再是实际连接目标，`validate_endpoint` 的 host 校验形同虚设
+  - 测试先把代理指向一个**已确认无人监听**的端口（并清掉 `NO_PROXY` 这条豁免通道），
+    再断言请求仍到达回环 stub —— 于是「用了代理」必然导致红，绿与红被彻底分开
+  - 同时断言请求行是 origin-form 而非代理用的 absolute-form
+- **回环 HTTP stub 抽为共用模块** `crates/repo-prism-core/tests/common/stub.rs`：
+  非阻塞 `accept()` 继承 `O_NONBLOCK`、`Connection: close` 这两个坑**只保留一份**，
+  由 `summarizer_http` 与 `summarizer_egress` 共用
 
 ### Fixed
 
@@ -60,9 +84,15 @@
   （543ms 与 203ms），**方案间的差异小于方案内的抖动**。干净轮测得 55%、加载轮测得 32%。
   因此本次**不承诺任何百分比**，验收标准只放在确定性的子进程次数上。
   要拿到可信的毫秒收益，需要在有真实大仓库且负载可控的环境里复测。
-- **本地 AI 层仍无真实模型验证**：`summarizer_http` 覆盖的是**我们这一侧**的 HTTP 路径，
-  而 stub 的响应形状是我们自己写的 —— 它证明不了真实 Ollama 的字段名与行为与假设一致。
-  `SPEC.md` US-7 该项仍是 `[待实现]`。
+- **本地 AI 层仍无真实模型验证**：P-07 覆盖的是**我们这一侧**的 HTTP 路径
+  （stub 的响应形状是我们自己写的），P-08 的 `summarizer_contract` 已把响应形状换成
+  **官方文档逐字示例**，于是字段名写错能被测出来。但**输入来自文档，不是一台真的 Ollama**：
+  证明不了某个具体版本的实际行为与文档一致（文档与实现之间仍有差距）。
+  `SPEC.md` US-7 该项仍是 `[待实现]` —— 截至本版本**一次真实模型调用都没有发生过**。
+- **本机无法安装 Ollama**，故上述缺口只能靠「文档契约 + 回环 stub」逼近，
+  无法在本环境内闭合。**没有**改用任何公网模型端点来绕过它：
+  那需要放宽 `validate_endpoint` 的回环限制，等于把本版本新增的第 4 层出网缓解作废，
+  且会把真实的仓库内容送到未经审核的第三方。
 
 ## [0.2.0] - 2026-10-09
 

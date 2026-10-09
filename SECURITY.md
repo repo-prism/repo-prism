@@ -47,7 +47,7 @@ CI 扫描器把 `--textconv` / `--filters` 列入**危险选项黑名单**：真
 （URL 语义里 `localhost` 是 userinfo，真实 host 是 `evil.com`）都会被放行 ——
 用户的代码就被送到了外部地址。
 
-**应对**（三层，缺一不可）：
+**应对**（四层，缺一不可）：
 
 1. **真解析而非比前缀**：拆出 authority → 拒绝含 `@` → 拆出 host 与 port →
    host 精确比对 `localhost` / `127.0.0.1` / `::1`。前缀判定与 `[::1]evil.com`
@@ -58,16 +58,32 @@ CI 扫描器把 `--textconv` / `--filters` 列入**危险选项黑名单**：真
 3. **默认关闭 + 只送最小内容**：`enabled` 为 false 时摘要器根本不会被构造；
    送出的只有文件的**相对路径与规则结果**，不含仓库绝对路径、remote URL、
    diff 正文与文件内容。
+4. **不遵循环境代理**：`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 这类环境变量
+   **会改写连接目标**——若被遵循，endpoint 上写着的 `127.0.0.1` 就不再是真正要连的
+   地址，第 1 层校验等于白做，而字节会先送到代理（企业网、CI、容器里代理是常态）。
+   因此请求显式使用构造出来的、**不读代理环境变量**的 agent
+   （`summarizer::local_agent`，**刻意不调用** `AgentBuilder::proxy_from_env()`），
+   并由 P-08 的 `tests/summarizer_egress.rs` 用一个指向**死端口**的代理把这条性质钉住。
 
 **必须知道的边界**：CI 的只读扫描器**看不见 HTTP 调用**（它是 Git 动词白名单）。
-本条约束**只由测试兜底**，不是静态扫描兜底。两层：
-`cargo test -p repo-prism-core --lib summarizer`（校验逻辑）与
-`cargo test -p repo-prism-core --test summarizer_http`（P-07：回环 stub 真实往返 +
-读请求体断言只送相对路径）。改动 `summarizer.rs` 的校验或请求构造时，这两条都要跑。
+本条约束**只由测试兜底**，不是静态扫描兜底。三层：
+
+```
+cargo test -p repo-prism-core --lib summarizer      # 校验逻辑（纯函数）
+cargo test -p repo-prism-core --test summarizer_http     # P-07：回环 stub 真实往返
+cargo test -p repo-prism-core --test summarizer_egress   # P-08：代理不得改道回环请求
+cargo test -p repo-prism-core --test summarizer_contract # P-08：与官方 API 文档的字段契约
+```
+
+改动 `summarizer.rs` 的校验或请求构造时，这四条都要跑。
 
 > P-07 之前，第 3 层（「只送最小内容」）**只有代码审查，没有测试** ——
 > 那两处 `ureq` 调用从未被执行过。第 3 层现在由
 > `the_bytes_that_leave_the_machine_carry_relative_paths_only` 直接断言请求体。
+>
+> P-08 之前，第 4 层（代理改道）**连文档都没写**，只是一条隐含假设：
+> 请求能被送达是因为 endpoint 写着回环地址，而没有人问过「这个地址是不是真的被用到了」。
+> 现在它既写进了代码（`local_agent`），也被测试钉住。
 
 `set_ai_settings` 的顺序也是这条边界的一部分：**先校验、再落盘、再入内存**。
 先存后校验等于允许用户绕开唯一那道闸门。

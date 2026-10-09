@@ -14,6 +14,8 @@
 //! 「另一个测试用得到」的误报，故在此统一关闭该项。
 #![allow(dead_code)]
 
+pub mod stub;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

@@ -82,7 +82,7 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **127 passed**（core 99 / CLI 14 / MCP 14） |
+| Rust 测试 | `cargo test --workspace` | ✅ **132 passed**（core 104 / CLI 14 / MCP 14） |
 | 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7） |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 27 files |
@@ -94,9 +94,9 @@
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ 修复后**四次**全绿：`99478ea` → run 37912380547、`278ceb9` → run 37913817616、`039399f`（P-07）→ run 37920164788、`02060e0`（ADR-002 / TASK-017）→ run 37924123551（6 腿全 success，2m 12s）。修复前（2026-10-07 19:33 起）**当时存在的 5 次运行全部失败** |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
-**core 99 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
+**core 104 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
 `parse_head_meta` 等）/ analysis 5 / diff 10 / perf 2 / remote 5 / snapshot 16 /
-**`summarizer_http` 8（P-07 新增）**。
+`summarizer_http` 8（P-07）/ **`summarizer_egress` 1 + `summarizer_contract` 4（P-08）**。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
 
@@ -107,10 +107,17 @@
 **spawn 次数不会**。所以 spawn 次数是比毫秒更硬、且能定位到具体方法的门禁，
 `tests/scale.rs`（`#[ignore]`）保留「改动前」的 argv 序列作为可重测的对照。
 
-**`summarizer_http` 补的是什么**：`summarizer.rs` 那 13 个单测是纯函数，
-而真正把字节送出进程的两处 `ureq` 调用在 P-07 之前**一次都没执行过**（本机无 Ollama）。
-现在用 `std::net::TcpListener` 在 127.0.0.1 起 stub 跑通往返，并把「出网 body 只含相对路径」
-钉成断言。**它不替代真实模型验证**——见下方「未解决的风险」。
+**`summarizer_*` 三个测试文件各补什么**：`summarizer.rs` 的 13 个单测是纯函数，
+而真正把字节送出进程的调用在 P-07 之前**一次都没执行过**（本机无 Ollama）。
+
+| 文件 | 补的是什么 |
+|------|-----------|
+| `summarizer_http`（P-07，8 项） | 回环 stub 真实往返；连不上 / 5xx / 非法 JSON / 空白 response 四条降级；`//api/tags` 拼接；**直接读请求体**断言「只送相对路径」 |
+| `summarizer_contract`（P-08，4 项） | 响应体**逐字取自 Ollama 官方 `docs/api.md`**，于是字段名写错会被测出来（P-07 做不到这一点：它的响应是我们自己写的）；另含「多行 NDJSON 必须整体判失败」 |
+| `summarizer_egress`（P-08，1 项） | **环境代理不得改道回环请求**。代理指向一个**已确认无人监听**的死端口，因此「用了代理」必然导致红 |
+
+共用回环 stub 在 `tests/common/stub.rs`（由 P-07 实现抽出，两个坑只保留一份）。
+**它们都不替代真实模型验证**——见下方「未解决的风险」。
 单次采样会把调度抖动算成代码性能——同一份代码实测出现过 208ms / 470ms / 576ms
 （576ms 那次直接超预算、测试变红）。绝对值随机器负载浮动，**只应看是否超预算**，
 不要跨机器比较。（上表 224ms 是负载较轻时的实测值；同一批代码在重负载下测到过 244ms。）
@@ -182,16 +189,21 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
 ### 未解决的风险（如实说明）
 
 - **本地 AI 层仍没有真实模型验证**：P-07 已让**我们这一侧**的 HTTP 路径真实跑起来
-  （`tests/summarizer_http.rs`，回环 stub 往返 + 出网 body 内容断言 + 四条降级路径），
-  但 **stub 的响应形状是我们自己写的** —— 它证明不了真实 Ollama 的字段名、
-  `stream: false` 的行为、错误码与我们的假设一致。真实调用的端到端验证
-  在 SPEC US-7 里**仍是 `[待实现]`**（本机无 Ollama）。
+  （`tests/summarizer_http.rs`，回环 stub 往返 + 出网 body 内容断言 + 四条降级路径）；
+  P-08 又把响应形状的**权威性**往前推了一步 —— `summarizer_contract` 的输入
+  **逐字取自 Ollama 官方 `docs/api.md`**，不再是我们自己编的，
+  于是「字段名写错」这种坏法第一次能被测出来。
+  但**输入来自文档，不是一台真的 Ollama**：它证明不了某个具体版本的实际行为与文档一致。
+  真实调用的端到端验证在 SPEC US-7 里**仍是 `[待实现]`** ——
+  截至本版本，**一次真实的模型调用都没有发生过**。
 - **出网闸门不归 CI 静态扫描管**：`read-only-guard.sh` 是 Git 动词白名单，
-  看不见 `ureq` 调用。这条边界现在有两层测试兜底：
-  `OllamaConfig::validate` 的单测（8 条「像 localhost」的输入）+ P-07 的
-  `the_bytes_that_leave_the_machine_carry_relative_paths_only`（直接读请求体）。
-  两层都不在扫描器里 —— **改动 `summarizer.rs` 若不跑 `summarizer` 与 `summarizer_http`
-  两组测试，闸门失效不会有任何提示。**
+  看不见 `ureq` 调用。这条边界现在有四组测试兜底：
+  `OllamaConfig::validate` 的单测（8 条「像 localhost」的输入）、P-07 的
+  `the_bytes_that_leave_the_machine_carry_relative_paths_only`（直接读请求体）、
+  P-08 的 `summarizer_egress`（**代理不得改道回环请求**）与 `summarizer_contract`
+  （响应字段名与厂商文档一致）。
+  四组都不在扫描器里 —— **改动 `summarizer.rs` 若不跑这四个 `summarizer*` 目标，
+  闸门失效不会有任何提示。**
 - **UI 接线没有自动化测试**：`App ↔ invoke` 一层需要 Tauri 运行时，单测覆盖不到；
   纯逻辑（graph / diff / risk / integrations / kinds / format / virtual）都有测试，
   但「点提交 → 出 Diff」「点按钮 → 开浏览器」「滚动列表」需人工 `pnpm tauri dev` 确认。

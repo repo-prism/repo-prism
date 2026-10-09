@@ -137,6 +137,10 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 - endpoint **只允许 `http://` + 回环地址**（`localhost` / `127.0.0.1` / `[::1]`）；
   判定必须**解析出 host 后精确比对**，不得比前缀——`http://localhost.evil.com`
   与 `http://localhost@evil.com` 都必须被拒（见 SECURITY.md 威胁 7）
+- **不遵循环境里的代理**：`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 会**改写连接目标**，
+  若被遵循则 endpoint 上写着的回环地址不再是实际连接目标。请求显式使用
+  `summarizer::local_agent()`（**刻意不调用** `AgentBuilder::proxy_from_env()`），
+  由 P-08 的 `tests/summarizer_egress.rs` 用指向死端口的代理钉住
 - 送出内容仅限**文件的相对路径与规则结果**：不送仓库绝对路径、不送 remote URL、
   不送 diff 正文、不送文件内容
 - 超时 60s；失败降级为 `None`，不把「模型没启动」升级为错误
@@ -147,8 +151,19 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 并覆盖连不上 / 5xx / 非法 JSON / 空白 response 四条降级路径。
 「出网 body 只含相对路径」这条不变式由**读请求体**直接断言，不再只靠代码审查。
 
+`[已实现]` 与 Ollama **官方 API 文档**的字段契约核对（P-08，`tests/summarizer_contract.rs`）：
+响应体**逐字取自**官方 `docs/api.md` 的示例而非我们自己编写，因此字段名写错会被测出来
+（`generate` 的 `response`、`list_models` 的 `models[].name`）。
+另覆盖「多行 NDJSON 必须整体判为失败而非截取第一行」。
+
+`[已实现]` 出网边界：环境代理不得改道回环请求（P-08，`tests/summarizer_egress.rs`）。
+断言的是**性质**而非机制——究竟是客户端不读代理变量、还是读但豁免回环，本测试不做区分
+（两者对本条安全承诺等价）。测试先**确认代理地址是死的**再断言请求仍到达回环 stub，
+因此「用了代理」必然导致红，绿与红被彻底分开。
+
 `[待实现]` **真实**模型调用的端到端验证（需本机安装 Ollama）：
-stub 的响应形状是我们自己写的，证明不了真实 Ollama 的字段名与行为与假设一致。
+契约核对的输入来自官方文档示例，证明不了**某个具体版本的实际行为**与文档一致。
+截至本版本，**一次真实的模型调用都没有发生过**。
 
 `[已实现]` 提交级 AI 分析：提交详情面板提供「AI 分析此提交」按钮，复用同一摘要器。
 切换提交必须清空上一条摘要（由 `key={sha}` 重挂载保证）。
@@ -206,14 +221,21 @@ stub 的响应形状是我们自己写的，证明不了真实 Ollama 的字段�
 
 - 只有 `summarizer::OllamaConfig` 一个入口，`new()` 即校验；构造成功 == 配置合法
 - scheme 只允许 `http`，host 只允许 `localhost` / `127.0.0.1` / `[::1]`
+- **请求不遵循环境代理**：agent 由 `summarizer::local_agent()` 显式构造，
+  刻意不使用 `AgentBuilder::proxy_from_env()`。`HTTP_PROXY` 之类会改写连接目标，
+  一旦被遵循，上面那条 host 校验就形同虚设
 - 依赖侧同步收窄：`ureq` 关闭默认特性（不带 TLS），避免为一个用不上的
   `https://localhost` 引入整棵 `rustls` / `ring` / `webpki` 依赖树
 - **只读扫描器不覆盖出网**：它是字面量级 Git 动词白名单，看不见 HTTP 调用。
-  这条边界靠两层测试守住：`OllamaConfig::validate` 的单测（`rejects_hosts_that_only_look_local`
-  用 8 条输入钉住前缀判定会放行的写法）+ P-07 的 `summarizer_http` 集成测试
-  （回环 stub 真实往返，并读请求体断言只送了相对路径）。
+  这条边界靠四组测试守住：
+  `OllamaConfig::validate` 的单测（`rejects_hosts_that_only_look_local`
+  用 8 条输入钉住前缀判定会放行的写法）、P-07 的 `summarizer_http`
+  （回环 stub 真实往返 + 读请求体断言只送了相对路径）、
+  P-08 的 `summarizer_egress`（代理不得改道回环请求）与
+  `summarizer_contract`（响应字段名与厂商文档一致）。
   这是本规格里**唯一靠测试而非静态扫描兜底**的安全约束 ——
-  **因此这两组测试必须会失败**：P-07 用 5 个探针逐个破坏被测逻辑验证过它们真的会红。
+  **因此这些测试必须会失败**：P-07 用 5 个探针、P-08 用 4 个探针逐个破坏被测逻辑，
+  逐条验证过它们真的会红。
 
 ### 只读安全
 

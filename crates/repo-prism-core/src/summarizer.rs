@@ -22,6 +22,12 @@
 //!    scheme，比直接拒绝它更糟。
 //! 3. **超时参数也纳入校验**。原稿让 `timeout_secs` 原样进 `Duration`，
 //!    `0` 会在库里变成「立即超时」这种难以定位的失败。这里限制到 1..=600。
+//! 4. **显式声明不使用环境代理**。`ureq::get` / `ureq::post` 这两个顶层便捷函数
+//!    构造的是默认 agent，从调用处**看不出作者有没有考虑过代理**；而
+//!    `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 这类环境变量是**会改写连接目标**的。
+//!    一旦被遵循，endpoint 上写着的 `127.0.0.1` 就不再是真正要连的地址。
+//!    改为显式构造 agent（见 `local_agent`），把这条要求写进代码，
+//!    而不是让它依赖某个库版本的默认行为。
 
 use crate::analysis::{ChangeAnalysis, RiskLevel, Summarizer};
 use serde::{Deserialize, Serialize};
@@ -149,6 +155,22 @@ fn validate_endpoint(endpoint: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 构造一个**不使用环境代理**的 HTTP agent。
+///
+/// 这条要求是安全性的，不是风格问题。`HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+/// 这类环境变量**会改写连接目标**：一旦被遵循，endpoint 上写着的 `127.0.0.1`
+/// 就不再是真正要连的地址，「只把仓库发给本机」这句承诺当场失效。
+/// 而本模块是全项目**唯一**的出网点——`scripts/read-only-guard.sh` 是 Git 动词
+/// 白名单、**看不见 HTTP 调用**，没有第二道静态防线兜底。
+///
+/// 因此这里**刻意不调用** `AgentBuilder::proxy_from_env()`（那是 ureq 的 opt-in）。
+/// 「不调用」是有意为之，不是疏漏：`crates/repo-prism-core/tests/summarizer_egress.rs`
+/// 用一个指向死端口的代理把这条性质钉住了——若 ureq 改变默认行为，那条测试会红，
+/// 而不是静静地让仓库内容绕道代理出去。
+fn local_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new().build()
+}
+
 /// 基于 Ollama 的摘要器。
 ///
 /// 构造即校验，因此**持有一个 `OllamaSummarizer` 就等价于「配置合法」**，
@@ -181,7 +203,8 @@ impl OllamaSummarizer {
     /// 设置面板用它做「测试连接」，也顺便给模型名输入框提供候选。
     pub fn list_models(&self) -> Result<Vec<String>, String> {
         let url = format!("{}/api/tags", self.base());
-        let response = ureq::get(&url)
+        let response = local_agent()
+            .get(&url)
             .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
             .call()
             .map_err(|e| format!("cannot reach the local model server at {url}: {e}"))?;
@@ -213,7 +236,8 @@ impl OllamaSummarizer {
             "stream": false,
             "options": { "temperature": 0.2 }
         });
-        let response = ureq::post(&url)
+        let response = local_agent()
+            .post(&url)
             .timeout(Duration::from_secs(self.config.timeout_secs))
             .send_json(body)
             .ok()?;

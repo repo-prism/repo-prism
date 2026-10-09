@@ -9,7 +9,7 @@
 //! `base()` 拼接写错、`stream` 忘了关、字段名从 `response` 改成 `message`、
 //! `Content-Length` 算错——这些都会让「摘要永远返回 None」而**没有任何一个测试变红**。
 //!
-//! 这里用 `std::net::TcpListener` 在 **127.0.0.1** 上起一个极小的 stub（不引新依赖），
+//! 这里用 `common::stub`（在 **127.0.0.1** 上起一个极小的 HTTP stub，不引新依赖）
 //! 让请求真的走一遍 TCP → HTTP 解析 → JSON 取值，并把「出网 body 里到底有什么」
 //! 钉成断言。覆盖四类：
 //!
@@ -19,194 +19,17 @@
 //! 4. **送出去的 body 只含相对路径**（SECURITY 威胁 7 第 3 层）
 //!
 //! **本文件不替代真实模型验证**：stub 只能证明「我们这一侧写得对」，
-//! 证明不了「真实 Ollama 的响应形状与我们的假设一致」。真实调用的端到端验证
-//! 在 SPEC US-7 里仍是 `[待实现]`。
+//! 证明不了「真实 Ollama 的响应形状与我们的假设一致」。后者由
+//! `summarizer_contract.rs` 按 Ollama 官方 API 文档的形状做**契约核对**，
+//! 而真正跑在真实模型上的端到端验证在 SPEC US-7 里仍是 `[待实现]`。
 
+mod common;
+
+use common::stub::{unused_port, Stub};
 use repo_prism_core::{
     ChangeAnalysis, OllamaConfig, OllamaSummarizer, Risk, RiskCounts, RiskLevel, Summarizer,
     DEFAULT_MODEL,
 };
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-
-/// stub 在没有新连接时最多再等多久就自行退出。
-///
-/// 有这个上限，断言失败导致的 panic 才不会把 `join` 挂死——测试要能失败得干脆。
-const STUB_IDLE_LIMIT: Duration = Duration::from_secs(3);
-
-// ---------------------------------------------------------------------------
-// 一个只认 HTTP/1.1、只服务固定次数请求的 stub 服务
-// ---------------------------------------------------------------------------
-
-/// stub 收到的一条请求。留着 `headers` 与 `body` 是为了断言**我们发出去了什么**，
-/// 而不只是断言「收到了一个请求」。
-#[derive(Debug, Clone)]
-struct Recorded {
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
-impl Recorded {
-    fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-struct Stub {
-    addr: SocketAddr,
-    seen: Arc<Mutex<Vec<Recorded>>>,
-    handle: JoinHandle<()>,
-}
-
-impl Stub {
-    /// 在 127.0.0.1 的随机端口上起 stub，服务满 `expect` 个请求即退出。
-    ///
-    /// `respond` 拿到请求，返回 `(状态码, 响应体)`；不做路由——每个用例只关心一种响应。
-    fn start<F>(expect: usize, respond: F) -> Self
-    where
-        F: Fn(&Recorded) -> (u16, String) + Send + 'static,
-    {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("stub 必须能在回环地址上监听");
-        listener
-            .set_nonblocking(true)
-            .expect("stub 监听必须设为非阻塞，否则 accept 会卡死待退出的线程");
-        let addr = listener.local_addr().expect("取 stub 监听地址");
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&seen);
-
-        let handle = thread::spawn(move || {
-            let deadline = Instant::now() + STUB_IDLE_LIMIT;
-            let mut served = 0usize;
-            while served < expect && Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        // 坑：监听者设成非阻塞后，macOS 上 accept 出的连接会**继承
-                        // O_NONBLOCK**，读请求时会随机 WouldBlock。若此时直接放弃，
-                        // 客户端只会看到「连接被关掉、没有响应」，报 Unexpected EOF——
-                        // 而症状会随请求数据到达的先后时红时绿。显式设回阻塞。
-                        stream
-                            .set_nonblocking(false)
-                            .expect("accept 出的连接必须设回阻塞模式");
-
-                        let request = read_request(&stream);
-                        let (status, body) = match &request {
-                            Some(request) => respond(request),
-                            // 解析失败也要回一个响应：让失败长成一个**可读的断言失败**，
-                            // 而不是变成客户端侧的 EOF（那种失败会把排查引向错误的代码）。
-                            None => (
-                                400,
-                                r#"{"error":"stub could not parse the request"}"#.to_string(),
-                            ),
-                        };
-                        write_response(&stream, status, &body);
-                        if let Some(request) = request {
-                            sink.lock().expect("stub 互斥锁").push(request);
-                        }
-                        served += 1;
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Self { addr, seen, handle }
-    }
-
-    fn endpoint(&self) -> String {
-        format!("http://127.0.0.1:{}", self.addr.port())
-    }
-
-    /// 等 stub 收工并取回它记下的请求。
-    ///
-    /// **必须调用**：不 join 就读 `seen` 会读到半个请求，断言就变成了看时序脸色。
-    fn finish(self) -> Vec<Recorded> {
-        let seen = Arc::clone(&self.seen);
-        let handle = self.handle;
-        handle.join().expect("stub 线程不该 panic");
-        let drained = seen.lock().expect("stub 互斥锁").clone();
-        drained
-    }
-}
-
-fn read_request(stream: &TcpStream) -> Option<Recorded> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("设读超时");
-    let mut reader = BufReader::new(stream);
-
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).ok()? == 0 {
-        return None;
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next()?.to_string();
-    let path = parts.next()?.to_string();
-
-    let mut headers = Vec::new();
-    let mut content_length = 0usize;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
-            break;
-        }
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_string();
-            let value = value.trim().to_string();
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = value.parse().unwrap_or(0);
-            }
-            headers.push((name, value));
-        }
-    }
-
-    let mut body = vec![0u8; content_length];
-    if content_length > 0 {
-        reader.read_exact(&mut body).ok()?;
-    }
-
-    Some(Recorded {
-        method,
-        path,
-        headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
-}
-
-fn write_response(mut stream: &TcpStream, status: u16, body: &str) {
-    let reason = match status {
-        200 => "OK",
-        500 => "Internal Server Error",
-        _ => "Error",
-    };
-    // `Connection: close` 是必须的：ureq 默认做连接池，不声明关闭它可能复用连接，
-    // 于是「第 2 个请求没到达 stub」这类假象会污染断言。
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\
-         \r\n",
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-    let _ = stream.flush();
-}
 
 // ---------------------------------------------------------------------------
 // 用例
@@ -222,14 +45,6 @@ fn config(endpoint: &str) -> OllamaConfig {
 
 fn summarizer_for(endpoint: &str) -> OllamaSummarizer {
     OllamaSummarizer::new(config(endpoint)).expect("回环地址上的合法配置必须构造成功")
-}
-
-/// 绑一个端口拿到号后立刻释放——得到一个「此刻无人监听」的端口。
-fn unused_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("绑一个临时端口");
-    let port = listener.local_addr().expect("取临时端口号").port();
-    drop(listener);
-    port
 }
 
 #[test]
