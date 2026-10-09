@@ -189,3 +189,39 @@ export interface RemoteInfo {
 export async function getRemoteInfo(path: string): Promise<RemoteInfo | null> {
   return invoke<RemoteInfo | null>("get_remote_info", { path });
 }
+
+// ---------------------------------------------------------------------------
+// 本地 AI 摘要（TASK-013 / TASK-014，对应 US-7 的模型层）
+//
+// 全部走用户自己的本地服务（Ollama）。endpoint 由后端 `summarizer.rs` 限制为
+// http:// + 回环地址，前端改不了这条边界 —— 它在 Rust 侧，不在输入框里。
+// ---------------------------------------------------------------------------
+
+export interface AiSettings {
+  enabled: boolean;
+  endpoint: string;
+  model: string;
+}
+
+export async function getAiSettings(): Promise<AiSettings> {
+  return invoke<AiSettings>("get_ai_settings");
+}
+
+/** 校验失败（非回环 endpoint）时 reject，后端不会把非法配置存下来。 */
+export async function setAiSettings(settings: AiSettings): Promise<void> {
+  return invoke<void>("set_ai_settings", { settings });
+}
+
+/** 探活给定的本地模型服务并返回已安装的模型名列表，**不落盘**。 */
+export async function testAiConnection(settings: AiSettings): Promise<string[]> {
+  return invoke<string[]>("test_ai_connection", { settings });
+}
+
+/** 未启用 AI 时返回 `null`（而非报错），调用方据此不渲染摘要条。 */
+export async function summarizeChanges(path: string): Promise<string | null> {
+  return invoke<string | null>("summarize_changes", { path });
+}
+
+export async function summarizeCommit(path: string, sha: string): Promise<string | null> {
+  return invoke<string | null>("summarize_commit", { path, sha });
+}

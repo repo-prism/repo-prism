@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { AiSettingsPanel } from "./components/AiSettingsPanel";
 import { BranchList } from "./components/BranchList";
 import { ChangesPanel } from "./components/ChangesPanel";
 import { CommitDetail } from "./components/CommitDetail";
@@ -6,11 +7,13 @@ import { CommitGraph } from "./components/CommitGraph";
 import { IntegrationBar } from "./components/IntegrationBar";
 import { RepoHeader } from "./components/RepoHeader";
 import {
+  type AiSettings,
   analyzeChanges,
   type ChangeAnalysis,
   type CommitDetail as CommitDetailData,
   type CommitInfo,
   type Diff,
+  getAiSettings,
   getCommitDetail,
   getCommitDiff,
   getCommits,
@@ -38,8 +41,19 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aiSettings, setAiSettings] = useState<AiSettings | null>(null);
+
+  // 设置一挂载就读：AI 按钮的可用状态不该等到用户打开设置面板才正确。
+  useEffect(() => {
+    getAiSettings()
+      .then(setAiSettings)
+      .catch(() => setAiSettings(null));
+  }, []);
+
   // 详情 / Diff 一律以已解析出的仓库根为准，避免用户改动输入框后两次请求指向不同仓库
   const repoPath = snapshot?.path ?? inputPath;
+  const aiEnabled = aiSettings?.enabled ?? false;
 
   function closeDetail() {
     setSelectedSha(null);
@@ -118,6 +132,15 @@ export default function App() {
             {loading ? "读取中…" : "打开"}
           </button>
         </div>
+        <button
+          type="button"
+          className={`settings-btn${aiEnabled ? " active" : ""}`}
+          onClick={() => setSettingsOpen(true)}
+          title={aiEnabled ? "本地 AI 已启用" : "AI 设置（默认关闭）"}
+          aria-label="AI 设置"
+        >
+          ⚙
+        </button>
       </header>
 
       {error && <div className="error-banner">{error}</div>}
@@ -130,6 +153,7 @@ export default function App() {
             <li>提交图 · 分支与标签 · 变更分组与风险标记</li>
             <li>点击任意提交查看变更文件与 Diff（统一 / 并排）</li>
             <li>一键跳转 GitDiagram / GitIngest / DeepWiki / GitHub.dev</li>
+            <li>可选本地 AI 摘要（Ollama，仅本机地址，默认关闭）</li>
           </ul>
         </div>
       )}
@@ -142,15 +166,24 @@ export default function App() {
           </aside>
           <main className="main">
             <IntegrationBar remote={remote} />
-            <ChangesPanel status={snapshot.status} analysis={analysis} />
+            <ChangesPanel
+              key={repoPath}
+              repoPath={repoPath}
+              status={snapshot.status}
+              analysis={analysis}
+              aiEnabled={aiEnabled}
+            />
             <div className={`main-split${selectedSha ? " has-detail" : ""}`}>
               <CommitGraph commits={commits} selectedSha={selectedSha} onSelect={selectCommit} />
               {selectedSha && (
                 <CommitDetail
+                  key={selectedSha}
+                  repoPath={repoPath}
                   detail={detail}
                   diff={diff}
                   loading={detailLoading}
                   error={detailError}
+                  aiEnabled={aiEnabled}
                   onClose={closeDetail}
                   onSelectCommit={selectCommit}
                 />
@@ -159,6 +192,12 @@ export default function App() {
           </main>
         </div>
       )}
+
+      <AiSettingsPanel
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={setAiSettings}
+      />
     </div>
   );
 }

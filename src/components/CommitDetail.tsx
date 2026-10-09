@@ -1,19 +1,54 @@
-import type { CommitDetail as CommitDetailData, Diff } from "../lib/api";
+import { useState } from "react";
+import { type CommitDetail as CommitDetailData, type Diff, summarizeCommit } from "../lib/api";
 import { formatBytes, formatRelativeDate } from "../lib/format";
 import { kindLabel, kindText } from "../lib/kinds";
 import { DiffView } from "./DiffView";
 
 interface Props {
+  repoPath: string;
   detail: CommitDetailData | null;
   diff: Diff | null;
   loading: boolean;
   error: string | null;
+  /** 未启用本地 AI 时按钮置灰，并给出原因提示。 */
+  aiEnabled: boolean;
   onClose: () => void;
   onSelectCommit: (sha: string) => void;
 }
 
-/** 提交详情（US-3）：元信息 + 变更文件清单 + Diff。 */
-export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCommit }: Props) {
+/**
+ * 提交详情（US-3）：元信息 + 变更文件清单 + Diff；另带可选的提交级 AI 分析（TASK-014）。
+ *
+ * 切换提交时的状态重置靠调用方的 `key={sha}` 重挂载，不在这里用 effect 手写 ——
+ * 那是 React 里更容易漏掉一条分支的写法。
+ */
+export function CommitDetail({
+  repoPath,
+  detail,
+  diff,
+  loading,
+  error,
+  aiEnabled,
+  onClose,
+  onSelectCommit,
+}: Props) {
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+
+  async function runAiSummary() {
+    if (!detail) return;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      setAiSummary(await summarizeCommit(repoPath, detail.info.sha));
+    } catch (e) {
+      setAiError(String(e));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   if (error) {
     return (
       <section className="commit-detail">
@@ -73,6 +108,27 @@ export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCo
             ))
           )}
         </div>
+
+        <div className="detail-ai">
+          <button
+            type="button"
+            className="ai-btn"
+            disabled={!aiEnabled || aiLoading}
+            onClick={runAiSummary}
+            title={aiEnabled ? "用本地模型分析这个提交" : "请先在右上角设置中启用本地 AI"}
+          >
+            {aiLoading ? "分析中…" : "AI 分析此提交"}
+          </button>
+          {!aiEnabled && <span className="muted">本地 AI 未启用</span>}
+        </div>
+
+        {aiSummary && (
+          <div className="ai-summary">
+            <span className="ai-tag">AI</span>
+            {aiSummary}
+          </div>
+        )}
+        {aiError && <div className="ai-error">{aiError}</div>}
       </div>
 
       <div className="detail-files">
