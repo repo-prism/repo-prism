@@ -48,6 +48,9 @@
 - 已暂存改动（`staged`）
 - 工作区改动（`unstaged`，含未跟踪文件）
 
+`[已实现]` 每组文件带**风险角标**（红 / 黄 / 蓝对应 critical / warn / info），
+面板顶部给出本地摘要条与关键/警告计数。规则清单见 US-7。
+
 ### US-3：查看提交详情（P0）
 
 `[已实现]` 点击任意提交后看到：
@@ -109,12 +112,20 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 
 ### US-7：AI 变更摘要（P1）
 
-`[待实现]` 对未提交改动生成人类可读摘要与风险标记（只读，不修改）。
-默认纯本地，LLM 摘要层需显式启用且只允许 localhost endpoint。
+`[已实现：本地启发式部分]` 对未提交改动生成人类可读摘要与风险标记（只读，不修改）。
+
+- 10 条启发式规则，覆盖异常处理 / 迁移 / API / 配置 / CI / 依赖 / 测试 / 大量删除
+- `summarize` 为本地拼装，**不调用任何模型**；`Summarizer` trait 默认实现是 Noop
+- 「大量删除」需要行数：由 `git diff --numstat -z` 提供，读不到时不命中（不误报）
+- `[待实现]` LLM 摘要层（本地 Ollama），见 TASK-013；接入时须**显式启用**且只允许 localhost endpoint
 
 ### US-8：一键跳转集成（P1）
 
-`[待实现]` 从 RepoPrism 一键跳转到 GitDiagram / GitIngest / DeepWiki / GitHub.dev。
+`[已实现]` 从 RepoPrism 一键跳转到 GitDiagram / GitIngest / DeepWiki / GitHub.dev。
+
+- 由 `origin` remote 解析出的 `host` / `owner` / `repo` 拼出 URL，**不访问网络**
+- 无 `origin`（或 URL 形式不可解析）时返回 `null`，界面提示而非报错
+- 跳转交给系统默认浏览器；RepoPrism 自身不抓取外部内容
 
 ### US-9：多仓库工作区（P2）
 
@@ -135,15 +146,27 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | 跨平台 | macOS / Windows / Linux       |
 | 安全   | 不运行外部 filter，不下载 LFS |
 | 隐私   | 默认本地优先，云功能需显式开启 |
+| 发布   | 三处版本号一致；产物为 draft，人工确认后发布 |
 
 ### 只读安全
 
 `[已实现]` CI 静态扫描 `crates/repo-prism-core/src`，实现为 `scripts/read-only-guard.sh`：
 
-- 三层校验：动词白名单 + 危险选项黑名单 + 条件动词必须带只读标志
+- 四层校验：Git 调用门槛 + 动词白名单 + 危险选项黑名单（含 `--textconv` / `--filters`）
+  + 全局写动词黑名单
 - 先自检扫描器本身（正例不误报、反例能检出），再扫描真实代码
 - 扫描器**自身执行失败**（如 awk 报错）必须以非零码退出，不得被当作「通过」
 - 详见 SECURITY.md
+
+### 发布
+
+`[已实现]`
+
+- 版本号在三处声明（`package.json` / workspace `Cargo.toml` / `src-tauri/tauri.conf.json`），
+  由 `pnpm release:dry` 绑定为一条断言，CI 每次运行都校验
+- `.github/workflows/release.yml` 由 `v*.*.*` tag 触发，构建三平台桌面安装包与四目标
+  CLI 二进制，**全部以 draft release 产出**
+- `[待实现]` 代码签名与 macOS 公证（缺证书，属独立任务）
 
 ### 性能
 
@@ -167,6 +190,8 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | ---------- | --------------------------- | ------ | ---------- |
 | 提交图     | 系统 git（ADR-001）         | P0     | 已实现     |
 | 变更分组   | `git status --porcelain=v2` | P0     | 已实现     |
+| 风险标记   | `git status` + `diff --numstat`（纯本地） | P1 | 已实现 |
+| 外部跳转   | `remote get-url` + URL 拼接  | P1     | 已实现     |
 | Diff       | `git show` / `git diff`     | P0     | 已实现     |
 | 分支列表   | `for-each-ref`              | P0     | 已实现     |
 | 提交详情   | `git show --stat`           | P0     | 已实现     |
@@ -175,8 +200,7 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | MCP Server | core 直接输出               | P1     | 已实现     |
 | 图片 / 字节预览 | `git cat-file`         | P0     | 待实现     |
 | worktree / stash 状态 | `worktree list` / `stash list` | P0 | 待实现 |
-| AI 摘要    | LLM（本地或云可选）         | P1     | 待实现     |
-| 外部跳转   | URL 拼接                    | P1     | 待实现     |
+| LLM 摘要   | 本地模型（如 Ollama）        | P1     | 待实现     |
 | 文件热度   | `git log --numstat`         | P2     | 待实现     |
 | PR/MR      | `gh` CLI / API              | P2     | 待实现     |
 | 多仓库     | 本地配置                    | P2     | 待实现     |
@@ -201,6 +225,13 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | `DiffFile` | 路径 / 类型 / `binary` / `truncated` / 增删计数 / `hunks` |
 | `DiffHunk` | 原始 `header` + 新旧起始行与行数 + `lines` |
 | `DiffLine` | `kind`（context/add/del）+ `old_no` / `new_no`（缺侧为 `null`）+ `content` |
+| `Risk` | `rule_id`（稳定标识）+ `level`（info/warn/critical）+ `message` + `path` |
+| `RiskCounts` | `info` / `warn` / `critical` 三个计数 |
+| `ChangeAnalysis` | `summary` + `total_files` + `risks: Risk[]` + `by_level: RiskCounts` |
+| `RemoteInfo` | `host` / `owner` / `repo` / `url`（`origin` 解析结果） |
+
+**不属于对外契约的内部类型**：`LineStat` / `LineStats`（工作区行数统计，只喂规则引擎，
+不进任何 JSON 输出）、`ChangeFacts` / `Rule`（规则引擎内部结构）。
 
 **尚未落地**：`RepoSnapshot` 目前不含 `worktrees` / `stashes`（US-1 待实现部分），
 模型里也没有对应结构——不留「先声明后实现」的空壳字段。

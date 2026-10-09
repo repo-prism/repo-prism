@@ -9,12 +9,14 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 
 - 🌳 **提交图**：分支、标签、HEAD、父子关系 ✅
 - 📝 **变更分组**：冲突 / 已暂存 / 工作区 ✅
+- ⚠️ **风险标记**：10 条纯本地启发式规则 + 摘要条 ✅
 - 🔍 **Diff**：统一 / 并排视图，含 Git 原始行号 ✅
-- 🖼️ **图片对比 / 媒体预览 / 字节预览** —— 计划中
-- 📄 **文本化仓库**：一键导出 LLM 友好纯文本 —— 计划中
-- 🏗️ **架构图**：集成 GitDiagram —— 计划中
-- 📚 **AI 文档**：集成 DeepWiki —— 计划中
+- 🔗 **一键跳转**：GitDiagram / GitIngest / DeepWiki / GitHub.dev ✅
 - 🤖 **Agent 协同**：CLI ✅ / Skill ✅ / MCP Server ✅
+- 🖼️ **图片对比 / 媒体预览 / 字节预览** —— 计划中
+- 📄 **文本化仓库（就地导出）** —— 计划中，当前走 GitIngest 跳转
+- 🏗️ **架构图（就地生成）** —— 计划中，当前走 GitDiagram 跳转
+- 📚 **AI 文档（就地问答）** —— 计划中，当前走 DeepWiki 跳转
 
 功能状态以 [`SPEC.md`](SPEC.md) 为唯一事实来源；上表未标 ✅ 的能力**尚未实现**。
 
@@ -66,10 +68,21 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 # 只读安全扫描（含扫描器自检）
 bash scripts/read-only-guard.sh --self-test
 bash scripts/read-only-guard.sh
+
+# 版本号一致性（三处声明：package.json / workspace Cargo.toml / tauri.conf.json）
+pnpm release:dry
 ```
 
 包管理器统一为 **pnpm**（版本以 `.github/workflows/ci.yml` 为准）。
 仓库不保留 `package-lock.json`，避免双锁文件让 `--frozen-lockfile` 的判定失去意义。
+
+## 发布
+
+打 `v*.*.*` tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，
+产出三平台桌面安装包与四目标 CLI 二进制，**全部是 draft release**，需人工确认后发布。
+当前**不做代码签名**（macOS 未公证、Windows 未签名），安装时会有系统警告 —— 这是已知情况。
+
+完整流程见 [`docs/RELEASE.md`](docs/RELEASE.md)，版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 文档地图
 
@@ -79,5 +92,7 @@ bash scripts/read-only-guard.sh
 | `SECURITY.md` | 只读安全模型、威胁模型、CI 扫描说明 |
 | `AGENTS.md` | 与 AI Agent 的协作协议与只读宪法 |
 | `ROADMAP.md` | 产品血统、编号规则与阶段计划 |
+| `CHANGELOG.md` | 版本历史（Keep a Changelog 格式） |
+| `docs/RELEASE.md` | 发布流程与人工验收步骤 |
 | `TASKS/` | 任务卡（血统编号；工程补丁见 `TASKS/patch/`） |
 | `ADR/` | 架构决策记录 |
