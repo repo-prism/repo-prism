@@ -40,6 +40,32 @@ CI 扫描器把 `--textconv` / `--filters` 列入**危险选项黑名单**：真
 用户能看到「已截断」，而不是拿到一份静默缺失的 diff。
 按字节截断必须回退到字符边界，否则会在多字节字符中间切开。
 
+### 威胁 7：代码被发往外部服务
+
+**场景**：可选的本地 AI 摘要层需要发 HTTP 请求。若校验写成「比前缀」，
+`http://localhost.evil.com`（前缀命中）与 `http://localhost@evil.com`
+（URL 语义里 `localhost` 是 userinfo，真实 host 是 `evil.com`）都会被放行 ——
+用户的代码就被送到了外部地址。
+
+**应对**（三层，缺一不可）：
+
+1. **真解析而非比前缀**：拆出 authority → 拒绝含 `@` → 拆出 host 与 port →
+   host 精确比对 `localhost` / `127.0.0.1` / `::1`。前缀判定与 `[::1]evil.com`
+   这类写法一起被 `rejects_hosts_that_only_look_local` 的 8 条输入钉住。
+2. **收窄 scheme 与依赖**：只允许 `http`（回环地址上 https 无实际用途），
+   `ureq` 关闭默认特性不带 TLS —— 依赖树里没有 `rustls` / `ring` / `webpki`，
+   也就不存在「哪天有人顺手打开一个云端 https endpoint」的机会。
+3. **默认关闭 + 只送最小内容**：`enabled` 为 false 时摘要器根本不会被构造；
+   送出的只有文件的**相对路径与规则结果**，不含仓库绝对路径、remote URL、
+   diff 正文与文件内容。
+
+**必须知道的边界**：CI 的只读扫描器**看不见 HTTP 调用**（它是 Git 动词白名单）。
+本条约束**只由单元测试兜底**，不是静态扫描兜底 —— 改动 `summarizer.rs`
+的校验逻辑时，`cargo test -p repo-prism-core --lib summarizer` 是唯一的防线。
+
+`set_ai_settings` 的顺序也是这条边界的一部分：**先校验、再落盘、再入内存**。
+先存后校验等于允许用户绕开唯一那道闸门。
+
 ---
 
 ## CI 只读扫描

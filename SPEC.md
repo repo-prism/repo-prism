@@ -31,7 +31,10 @@
 
 - `[已实现]` 当前分支、HEAD 位置、标签
 - `[已实现]` 提交图（父子关系）——lane 分配与分支配色，ref 附着到对应提交，
-  相对时间显示；单页渲染上限 300 条、lane 上限 10（简化算法，不做完整 Git 图复杂度）
+  相对时间显示；单页读取上限 300 条、lane 上限 10（简化算法，不做完整 Git 图复杂度）
+  - 列表为**虚拟滚动**：DOM 行数只与视口高度有关，与提交总数无关
+    （300 条提交下渲染行数 < 80，验收断言见 `src/lib/virtual.test.ts`）
+  - 行高固定 48px、overscan 8 行；区间计算抽为纯函数 `computeRange`，可被断言
 - `[已实现]` 本地分支列表
 - `[已实现]` 上游跟踪计数（ahead / behind）
   - 数据取自 `git status --porcelain=v2 --branch` 的 `# branch.upstream` 与 `# branch.ab`，
@@ -50,6 +53,9 @@
 
 `[已实现]` 每组文件带**风险角标**（红 / 黄 / 蓝对应 critical / warn / info），
 面板顶部给出本地摘要条与关键/警告计数。规则清单见 US-7。
+
+`[已实现]` 面板顶部提供「AI 摘要」按钮（US-7 的模型层），**默认置灰**；
+未启用本地 AI 或工作区干净时禁用，并给出原因提示。
 
 ### US-3：查看提交详情（P0）
 
@@ -105,19 +111,41 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 `[已实现]` Claude Desktop / Cursor 通过 MCP 协议读取仓库状态。
 
 - stdio 传输，JSON-RPC 2.0，newline-delimited
-- 三个只读工具：`repoprism_inspect` / `repoprism_commits` / `repoprism_detail`
+- 五个只读工具：
+  `repoprism_inspect` / `repoprism_commits` / `repoprism_detail` /
+  `repoprism_analyze` / `repoprism_remote`
 - `tools/call` 结果放在 `content[0].text`，且 `text` **必须是字符串**
+- 错误码分层：未知方法 `-32601`、参数缺失或非法 `-32602`；
+  不得把「参数错」与「服务端内部错」压成同一个码
 - 无 `id` 的消息按通知处理，不返回响应
 - 不暴露 `git` 透传入口；本 crate 不直接调用 Git，只调用 `repo-prism-core`
+- `repoprism_analyze` 走**本地规则引擎**，不调用模型、不联网（与桌面端同一实现）
 
 ### US-7：AI 变更摘要（P1）
 
-`[已实现：本地启发式部分]` 对未提交改动生成人类可读摘要与风险标记（只读，不修改）。
+`[已实现]` 对未提交改动生成人类可读摘要与风险标记（只读，不修改）。
+
+**本地启发式层（默认行为，无配置即可用）**
 
 - 10 条启发式规则，覆盖异常处理 / 迁移 / API / 配置 / CI / 依赖 / 测试 / 大量删除
-- `summarize` 为本地拼装，**不调用任何模型**；`Summarizer` trait 默认实现是 Noop
+- `summary` 为本地拼装，**不调用任何模型**；`Summarizer` trait 默认实现是 `NoopSummarizer`
 - 「大量删除」需要行数：由 `git diff --numstat -z` 提供，读不到时不命中（不误报）
-- `[待实现]` LLM 摘要层（本地 Ollama），见 TASK-013；接入时须**显式启用**且只允许 localhost endpoint
+
+**LLM 摘要层（可选，默认关闭）**
+
+- `OllamaSummarizer` 实现 `Summarizer` trait；由 `set_ai_settings` 显式启用后才可调用
+- endpoint **只允许 `http://` + 回环地址**（`localhost` / `127.0.0.1` / `[::1]`）；
+  判定必须**解析出 host 后精确比对**，不得比前缀——`http://localhost.evil.com`
+  与 `http://localhost@evil.com` 都必须被拒（见 SECURITY.md 威胁 7）
+- 送出内容仅限**文件的相对路径与规则结果**：不送仓库绝对路径、不送 remote URL、
+  不送 diff 正文、不送文件内容
+- 超时 60s；失败降级为 `None`，不把「模型没启动」升级为错误
+- 设置持久化到用户配置目录；读取失败回默认值（关闭）
+
+`[待实现]` 真实模型调用的端到端验证（需本机安装 Ollama）
+
+`[已实现]` 提交级 AI 分析：提交详情面板提供「AI 分析此提交」按钮，复用同一摘要器。
+切换提交必须清空上一条摘要（由 `key={sha}` 重挂载保证）。
 
 ### US-8：一键跳转集成（P1）
 
@@ -146,7 +174,20 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | 跨平台 | macOS / Windows / Linux       |
 | 安全   | 不运行外部 filter，不下载 LFS |
 | 隐私   | 默认本地优先，云功能需显式开启 |
+| 出网   | 唯一出网点是回环地址上的本地模型服务，默认关闭 |
 | 发布   | 三处版本号一致；产物为 draft，人工确认后发布 |
+
+### 出网（本地模型）
+
+`[已实现]` `repo-prism-core` 是唯一出网的 crate，且出网范围被硬编码收窄：
+
+- 只有 `summarizer::OllamaConfig` 一个入口，`new()` 即校验；构造成功 == 配置合法
+- scheme 只允许 `http`，host 只允许 `localhost` / `127.0.0.1` / `[::1]`
+- 依赖侧同步收窄：`ureq` 关闭默认特性（不带 TLS），避免为一个用不上的
+  `https://localhost` 引入整棵 `rustls` / `ring` / `webpki` 依赖树
+- **只读扫描器不覆盖出网**：它是字面量级 Git 动词白名单，看不见 HTTP 调用。
+  这条边界靠 `OllamaConfig::validate` 的单元测试守住（`rejects_hosts_that_only_look_local`
+  用 8 条输入钉住前缀判定会放行的写法）。这是本规格里**唯一靠测试而非静态扫描兜底**的安全约束。
 
 ### 只读安全
 
@@ -197,10 +238,11 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | 提交详情   | `git show --stat`           | P0     | 已实现     |
 | CLI JSON   | core 直接输出               | P0     | 已实现     |
 | Skill      | CLI 包装                    | P1     | 已实现     |
-| MCP Server | core 直接输出               | P1     | 已实现     |
+| MCP Server | core 直接输出（5 个工具）     | P1     | 已实现     |
+| LLM 摘要   | 本地模型（Ollama，回环地址）  | P1     | 已实现（默认关闭） |
+| 虚拟滚动   | 前端渲染层，无新增数据源      | P0     | 已实现     |
 | 图片 / 字节预览 | `git cat-file`         | P0     | 待实现     |
 | worktree / stash 状态 | `worktree list` / `stash list` | P0 | 待实现 |
-| LLM 摘要   | 本地模型（如 Ollama）        | P1     | 待实现     |
 | 文件热度   | `git log --numstat`         | P2     | 待实现     |
 | PR/MR      | `gh` CLI / API              | P2     | 待实现     |
 | 多仓库     | 本地配置                    | P2     | 待实现     |
@@ -229,9 +271,13 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | `RiskCounts` | `info` / `warn` / `critical` 三个计数 |
 | `ChangeAnalysis` | `summary` + `total_files` + `risks: Risk[]` + `by_level: RiskCounts` |
 | `RemoteInfo` | `host` / `owner` / `repo` / `url`（`origin` 解析结果） |
+| `OllamaConfig` | `endpoint` / `model` / `timeout_secs`（本地模型连接配置，**不属仓库 JSON 契约**） |
 
 **不属于对外契约的内部类型**：`LineStat` / `LineStats`（工作区行数统计，只喂规则引擎，
 不进任何 JSON 输出）、`ChangeFacts` / `Rule`（规则引擎内部结构）。
+
+**仅存在于 Tauri 层、不进 core 的类型**：`AiSettings`（设置面板的
+`enabled` / `endpoint` / `model`，落盘于用户配置目录）。core 只知道 `OllamaConfig`。
 
 **尚未落地**：`RepoSnapshot` 目前不含 `worktrees` / `stashes`（US-1 待实现部分），
 模型里也没有对应结构——不留「先声明后实现」的空壳字段。
@@ -243,3 +289,4 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 - ❌ 不做代码编辑器（集成 GitHub.dev 而非自研编辑器）
 - ❌ 不做 CI/CD 平台
 - ❌ 不做代码托管
+- ❌ **不把代码或仓库内容发往任何云端服务**；唯一的出网目标是回环地址上的本地模型

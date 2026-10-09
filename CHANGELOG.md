@@ -6,6 +6,45 @@
 
 ## [Unreleased]
 
+计划作为 **v0.2.0** 发布（`006` 批次负责提版本号、打 tag）。以下为 `004` + `005` 批次的内容。
+
+### Added
+
+- **本地 AI 摘要层**（`crates/repo-prism-core/src/summarizer.rs`）
+  - `OllamaSummarizer` 实现 `Summarizer` trait，接入用户自己的本地模型服务
+  - **只允许 `http://` + 回环地址**（`localhost` / `127.0.0.1` / `[::1]`）；
+    校验解析出 host 后精确比对，拒绝 `http://localhost.evil.com`、
+    `http://localhost@evil.com` 这类只在前缀上像 localhost 的写法
+  - 只发送文件的**相对路径与规则结果**；不发送仓库路径、remote URL、diff 正文或文件内容
+  - 默认关闭；设置持久化到用户配置目录（读取失败回默认值）
+- **提交级 AI 分析**：提交详情面板的「AI 分析此提交」按钮，复用同一摘要器
+- **AI 设置面板**：endpoint / model / 启用开关 + 测试连接（只测不存）
+- **MCP 工具扩展**：新增 `repoprism_analyze` 与 `repoprism_remote`，工具数 3 → 5
+- **提交列表虚拟滚动**：行高 48px、overscan 8；300 条提交下渲染行数 < 80
+- **`repoprism analyze` 走带行数统计的规则路径**：桌面端与 MCP 的
+  `mass-deletion` 规则现在真正生效（此前 `from_status` 不带行数，该规则恒不命中）
+
+### Changed
+
+- `analyze_changes` 在行数统计失败时**降级为纯路径规则**，而不是让整个分析报错
+- `ureq` 关闭默认特性（不带 TLS）：回环地址上的 https 无实际用途，
+  关掉可整棵移除 `rustls` / `ring` / `webpki` 依赖树
+
+### Security
+
+- 新增威胁 7「代码被发往外部服务」及其三层缓解（真解析 host / 收窄 scheme 与依赖 /
+  默认关闭且只送最小内容），见 `SECURITY.md`
+- **明确记录**：只读扫描器**看不见 HTTP 调用**，出网闸门只由 `summarizer.rs`
+  的单元测试兜底 —— 这是本规格里唯一不靠静态扫描的安全约束
+
+### Known limitations
+
+- **本地 AI 层没有端到端验证**：校验与 prompt 构造有 13 个单测，
+  但本机未安装 Ollama，**一次真实的模型调用都没有发生过**（HTTP 路径未经运行验证）
+- 虚拟滚动的区间计算有断言覆盖，但真实滚动帧率未测量（需 GUI）
+- 其余同 v0.1.0：未签名、release workflow 未在 GitHub 上跑过、
+  UI 接线无自动化测试、MCP 未与真实客户端联调
+
 ## [0.1.0] - 2026-10-09
 
 首个可发布版本。
