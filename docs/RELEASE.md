@@ -1,0 +1,104 @@
+# 发布流程
+
+> 面向维护者。产品定位与需求见 `SPEC.md`，只读约束见 `SECURITY.md`。
+
+## 0. 前置条件
+
+| 事项 | 状态 |
+|------|------|
+| CI 在待发布的提交上全绿（`main`） | 必须 |
+| 三处版本号一致 | `pnpm release:dry` 校验 |
+| 管理员有仓库 `contents: write` 权限 | 打 tag 需要 |
+
+## 1. 版本 bump
+
+版本号在本项目里有**三处**独立声明，必须同步改：
+
+| 文件 | 字段 |
+|------|------|
+| `package.json` | `version` |
+| `Cargo.toml` | `[workspace.package] version` |
+| `src-tauri/tauri.conf.json` | `version` |
+
+各 crate 自己的 `Cargo.toml` 写的是 `version.workspace = true`，自动继承，**不要**改成硬编码
+（`scripts/check-versions.mjs` 会拦下来）。
+
+改完先校验一遍：
+
+```bash
+pnpm release:dry
+# 期望输出：next version: 0.2.0
+```
+
+不一致时会逐行列出三处各自的值并以退出码 1 失败。
+
+## 2. 更新 CHANGELOG
+
+在 `CHANGELOG.md` 顶部把 `## [Unreleased]` 的内容整理成新版本条目，
+并补上日期（`## [0.2.0] - YYYY-MM-DD`）。
+
+## 3. 提交并打 tag
+
+```bash
+git add package.json Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
+git commit -m "chore(release): v0.2.0"
+git push origin main
+
+git tag v0.2.0          # 必须是 vX.Y.Z，release workflow 只认这个形状
+git push origin v0.2.0
+```
+
+> tag 必须带 `v` 前缀。`release.yml` 里 `--expect-ref` 会自动剥掉 `v` 再比对
+> `package.json` 的 `0.2.0`。
+
+## 4. CI 自动构建
+
+`.github/workflows/release.yml` 由 tag 触发，分三个阶段：
+
+1. **verify** —— 校验 tag 与三处版本号一致，并跑一次只读扫描（自检 + 真实扫描）
+2. **desktop**（needs: verify）—— `tauri-apps/tauri-action` 在 ubuntu / macos / windows
+   三平台打包，并把安装包挂到 draft release
+3. **cli**（needs: verify, desktop）—— 用 `softprops/action-gh-release` 挂四个 CLI 二进制：
+   - `repoprism-linux-x86_64`
+   - `repoprism-macos-aarch64`
+   - `repoprism-macos-x86_64`
+   - `repoprism-windows-x86_64.exe`
+
+`cli` 排在 `desktop` 之后不是偶然：draft release 由 `tauri-action` 创建，
+两个 job 同时抢建同一个 release 会撞 422。
+
+## 5. 人工验收（必做）
+
+产物是 **draft**，不会自动发布。发布前请：
+
+1. 下载三个平台的桌面安装包，各装一遍，打开仓库看四个视图是否正常
+2. 下载至少一个 CLI 二进制，`repoprism inspect . --json` 与 `repoprism skill --print` 各跑一次
+3. 确认 Release 说明与 `CHANGELOG.md` 一致
+
+**未签名提示**：当前不做代码签名（缺 Apple Developer 证书与 Windows 代码签名证书），
+macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。这是已知情况，
+不要因为警告就以为产物坏了。
+
+## 6. 发布后
+
+- 手动把 draft release 点成 published
+- P1：Homebrew tap / winget manifest / npm 包
+- P1：补代码签名与 macOS 公证（需要证书与 secrets，属独立任务卡）
+
+## 版本号约定
+
+遵循 SemVer：
+
+- `v0.x.y`：MVP 阶段，API 可能变动
+- `v1.0.0`：API 稳定，只读宪法冻结
+
+**文档版本与产品版本无关**：`SPEC.md` 顶部的文档版本号不随产品版本变化，
+它只标记规格本身的修订（见 `SPEC.md` 开头说明）。
+
+## 已知缺口
+
+| 缺口 | 影响 |
+|------|------|
+| 无代码签名 | 用户安装时看到系统警告 |
+| release workflow 未实机跑过 | 首次发布需人工盯一遍 Actions 日志 |
+| 无自动更新（updater） | 用户需手动下载新版本 |

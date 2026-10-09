@@ -1,0 +1,146 @@
+name: Release
+
+# 由 tag 触发（`v0.1.0` / `v0.2.3` …），也可手动指定已有 tag 重跑。
+#
+# 产物一律是 **draft release**：本仓库不做代码签名（缺 Apple Developer 证书与
+# Windows 代码签名证书），因此必须人工过一遍再点发布。详见 docs/RELEASE.md。
+#
+# ⚠️ 本工作流**尚未在 GitHub 上实际执行过** —— 本机没有可用的 Actions 环境。
+#    首次发布请把 draft release 里的四个平台产物都下载装一遍再发布。
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify version and read-only guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # tag 必须与三处版本号对齐。这一步挡的是「tag 打了 v0.2.0、安装包里
+      # 还是 0.1.0」——这种事故只有用户装完才会发现。
+      #
+      # workflow_dispatch 若从分支触发（ref 不是 tag），就没有可比对的 tag，
+      # 此时退化为只校验三处一致 —— 直接拿分支名去比会得到一句莫名其妙的
+      # 「版本号 0.1.0 与期望的 main 不一致」。
+      - name: Version must match the tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            node scripts/check-versions.mjs --expect-ref "${GITHUB_REF}"
+          else
+            echo "非 tag 触发（${GITHUB_REF}），只校验三处版本号一致"
+            node scripts/check-versions.mjs
+          fi
+      # 发版这一刻再确认一次「只读宪法」没被破坏。Rust / 前端的门禁由 ci.yml
+      # 在 main 上把关，这里只补一条成本极低的底线检查。
+      - name: Read-only guard
+        run: |
+          bash scripts/read-only-guard.sh --self-test
+          bash scripts/read-only-guard.sh
+
+  desktop:
+    name: Desktop bundle (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          # 与 ci.yml 保持同一个钉住的版本（原因见 ci.yml 的注释）
+          version: 12.10.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Tauri 2 在 Linux 上的构建依赖。注意是 libayatana-appindicator3-dev
+      # 而不是旧的 libappindicator3-dev —— Ubuntu 22.04 起只发前者。
+      - name: Install Linux Tauri dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+      - run: pnpm install --frozen-lockfile
+      - name: Build and attach to the draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "RepoPrism ${{ github.ref_name }}"
+          releaseBody: |
+            只读仓库智能工具。**未签名的 draft 版本**，安装前请留意系统签名警告。
+
+            - 桌面安装包：macOS / Windows / Linux
+            - CLI 二进制：见下方附件（`repoprism-<平台>-<架构>`）
+            - Agent 接入：`repoprism skill --print` 取 SKILL.md；MCP Server 见仓库 README
+          releaseDraft: true
+          prerelease: false
+
+  cli:
+    name: CLI binary (${{ matrix.name }})
+    # 排在 desktop 之后：tauri-action 负责创建 draft release，
+    # 两个 job 同时抢着建同一个 release 会撞 422。串起来就没有竞态。
+    needs: [verify, desktop]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: repoprism-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: repoprism-macos-aarch64
+          # Intel 切片在 arm64 runner 上交叉编译：rustup 装目标，系统 clang
+          # 带 -arch x86_64，macOS SDK 两个切片都在。**不依赖 macos-13** ——
+          # 那是最后一代 Intel runner，已在退役路径上。
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: repoprism-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: repoprism-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      # --locked：发布产物必须与仓库里提交的 Cargo.lock 完全对应
+      - run: cargo build --release --locked -p repo-prism-cli --target ${{ matrix.target }}
+      - name: Stage the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="target/${{ matrix.target }}/release/repoprism"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            src="${src}.exe"
+          fi
+          cp "$src" "${{ matrix.name }}"
+      - name: Attach to the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ matrix.name }}

@@ -31,6 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
       # --all-targets：连测试代码一起 lint，否则 tests/ 里的 warning 永远不会被发现
@@ -45,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # AGENTS.md 的质量门禁要求「大仓库首屏 < 3s」，各任务卡另有具体指标。
       # 这一步把它们变成会真实失败的断言；--nocapture 让实测值出现在 CI 日志里，
       # 便于区分「代码退化」与「runner 抖动」。
@@ -77,3 +79,6 @@ jobs:
       - run: pnpm test
       # 类型检查与单测都过了，不代表产物能构建出来
       - run: pnpm build
+      # 版本号在三处独立声明（package.json / workspace Cargo.toml / tauri.conf.json）。
+      # 漂移要在这里就红，而不是等到打 tag 发版那一刻 —— 那时已经有安装包了。
+      - run: pnpm release:dry

@@ -12,7 +12,8 @@ dist
 dist-ssr
 *.local
 
-# 包管理器统一为 pnpm（见 package.json 的 packageManager 字段）。
+# 包管理器统一为 pnpm（版本钉在 .github/workflows/ci.yml，不写 packageManager
+# 字段 —— 写进去会让 pnpm 把自身记入锁文件，见 ci.yml 里的说明）。
 # 误跑 npm install 会生成 package-lock.json，与 pnpm-lock.yaml 形成双锁文件，
 # 让 `pnpm install --frozen-lockfile` 的判定失去意义，故显式忽略。
 package-lock.json
