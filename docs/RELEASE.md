@@ -119,16 +119,20 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 
 | 版本 | 日期 | tag | 内容 |
 |------|------|-----|------|
-| 0.2.0 | 2026-10-09 | `v0.2.0` | 首次实际发布：`004` + `005` 批次（变更分析、外部集成、发布硬化、本地 AI 摘要层、MCP 扩展、虚拟滚动） |
+| 0.2.0 | 2026-10-09 | `v0.2.0` | 首次实际发布：`004` + `005` 批次（变更分析、外部集成、发布硬化、本地 AI 摘要层、MCP 扩展、虚拟滚动）。`release.yml` 首跑 **Status Success**（9m 2s，12 个 job 腿全部完成） |
 | 0.1.0 | — | — | **从未发布**：`CHANGELOG.md` 保留了这一段的开发记录，但没有打过 tag，也没有产出过安装包 |
 
 > 首个可下载版本是 v0.2.0。0.1.0 的条目仅作历史记录，不要用它去对 Release 页面。
+>
+> v0.2.0 的 draft release 需人工点发布才会对外可见；**draft 只有有写权限的人能看到**，
+> 所以「11 个附件是否齐全」这一步无法由外部核验，必须登录后在 Releases 页面确认。
 
 ## 已知缺口
 
 | 缺口 | 影响 |
 |------|------|
 | 无代码签名 | 用户安装时看到系统警告 |
-| `release.yml` 的首次运行就是 v0.2.0 | 本机无 Actions 环境，四个 job（verify / desktop / cli / mcp-binaries）是否全绿只能看 GitHub Actions 页面 |
+| draft 附件清单无法从外部核验 | draft release 只有有写权限的人可见，仓库外的人（包括匿名 API）看不到附件列表 |
+| GitHub Actions 的 Node 20 弃用告警 | `v0.2.0` 首跑报出 12 条 warning：`actions/checkout@v4` / `actions/setup-node@v4` / `pnpm/action-setup@v4` / `softprops/action-gh-release@v2` 仍面向 Node 20、被强制跑到 Node 24。**升版前必须先确认各 action 的新版本号存在**，盲升会当场打断发布链路 |
 | 无自动更新（updater） | 用户需手动下载新版本 |
 | `productName` 仍是 `repoprism-app` | 安装包与窗口标题显示的是这个旧名，与产品名 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，一直没擅自改 |

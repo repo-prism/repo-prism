@@ -84,7 +84,8 @@
 | 前端构建 | `vite build` | ✅ `dist/assets/index-qz-52nYw.js` 244.43 kB（gzip 76.49 kB） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.1.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
-| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ⚠️ 2026-10-07 起 5 次全红；2026-10-09 定位并修复（`ci.yml` 补 Tauri Linux 系统依赖 + 关 `fail-fast`），修复后的运行结果以 Actions 为准 |
+| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ 修复后两次全绿：`99478ea` → run 37912380547、`278ceb9` → run 37913817616。修复前（2026-10-07 19:33 起）**当时存在的 5 次运行全部失败** |
+| 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
 **core 87 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
 diff 10 / perf 1 / remote 5 / snapshot 16。
@@ -134,7 +135,8 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
 
 | 事项 | 说明 |
 |------|------|
-| 盯 `release.yml` 首次运行 | 四个 job（verify / desktop / cli / mcp-binaries）应产出 11 个附件；本机无法观测 |
+| ~~盯 `release.yml` 首次运行~~ | ✅ 已跑：run 37914120667，Status Success，9m 2s，12 个 job 腿全部完成 |
+| 人工核附件清单 | 预期 11 个（3 桌面 + 4 CLI + 4 MCP）。**draft 不对外可见，匿名访问看不到**，需在 Releases 页面确认 |
 | 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5 |
 | 点发布 | draft 不会自动对外可见 |
 
@@ -159,9 +161,10 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
   纯逻辑（graph / diff / risk / integrations / kinds / format / virtual）都有测试，
   但「点提交 → 出 Diff」「点按钮 → 开浏览器」「滚动列表」需人工 `pnpm tauri dev` 确认。
   TASK-016 把虚拟滚动的**区间计算**变成了可断言的形式，但真实滚动帧率仍未被测。
-- **CI 一直在跑，而且一直是红的**（2026-10-09 发现并修复）：本文件此前写的「CI 尚未验证」
-  是**错的**。仓库是公开的，`ci.yml` 在每次 push 到 `main` 时都真实执行 —— 2026-10-07 起的
-  5 次运行**全部失败**，包括 `004` 与 `005` 两批。
+- **CI 曾在 ubuntu 上一直红**（2026-10-09 发现并修复，修复后已两次验证全绿）：
+  本文件此前写的「CI 尚未验证」是**错的**。仓库是公开的，`ci.yml` 在每次 push 到 `main`
+  时都真实执行 —— 修复前**当时存在的 5 次运行全部失败**（最早一次是仓库的 `INIT` 提交），
+  包括 `004` 与 `005` 两批。
   失败点始终只有一处：**ubuntu leg 的 clippy（exit 101）**。原因不是代码，而是
   `cargo clippy --workspace` 会连 `src-tauri` 一起检查，而 rust job 从未安装
   WebKitGTK / GTK / libsoup 这些 **Linux 系统库**（只有 `release.yml` 的 desktop job 装了）。
@@ -169,9 +172,16 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
   又因为矩阵默认 `fail-fast: true`，ubuntu 一红就把另外两个腿掐掉，日志里只剩 `cancelled`
   —— 把「只有一个平台红」这件事掩盖了整整 5 次运行。
   修复：`ci.yml` 的 rust job 在 ubuntu 上补装 Tauri Linux 依赖，并显式关掉 `fail-fast`。
+  验证：`99478ea` → run 37912380547（仓库首次全绿）、`278ceb9` → run 37913817616。
   教训：**门禁红过就是红过，不能因为本机绿就写「尚未验证」。**
-- **`release.yml` 仍未实机跑过**：它是 tag 触发的，而历史上没有任何 tag，
-  所以 v0.2.0 是它的首跑，必须人工盯。
+- **`release.yml` 已实机跑过并被验为绿**（2026-10-09，tag `v0.2.0` → run 37914120667，
+  Status Success，9m 2s，12 个 job 腿全部完成）。但**产物是 draft、不对外可见**，
+  「11 个附件是否齐全」需要人工在 Releases 页面确认（匿名访问看不到 draft）。
+- **GitHub Actions 的 Node 20 弃用告警**：该次运行报出 12 条 warning，
+  `actions/checkout@v4` / `actions/setup-node@v4` / `pnpm/action-setup@v4` /
+  `softprops/action-gh-release@v2` 都还在 Node 20 上、被强制跑到 Node 24。
+  目前只是告警，但需要在**确认各 action 的新版本号之后**再统一升版 ——
+  盲升 action 版本号正是会当场炸掉发布链路的那类改动，故未在本批处理。
 - **MCP 未与真实客户端联调**：协议行为由 14 个真实子进程测试覆盖，
   但尚未在 Claude Desktop / Cursor 中实机连接过。
 - **发布产物未签名**：安装时会有系统警告，见 `CHANGELOG.md` 的 Known limitations。
