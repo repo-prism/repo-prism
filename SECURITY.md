@@ -9,62 +9,77 @@
 ## 威胁模型与应对
 
 ### 威胁 1：恶意仓库通过 content filter 执行任意代码
-**场景**：仓库的 `.gitattributes` 定义了 external filter，Git 在读取时触发执行。
-**应对**：RepoPrism 不运行任何 external filter 或转换器。读取时使用 `git cat-file`、`git show` 等不触发 filter 的底层命令。若必须读取经过 filter 的内容，展示原始字节并说明限制。
+**场景**：仓库的 `.gitattributes` 定义了 external textconv filter，Git 在生成 diff 时触发执行。
+**应对**：读取 diff 时**显式传 `--no-textconv`**。读取 blob 使用 `git cat-file`、`git show` 等不触发 filter 的底层命令。
+若必须读取经过 filter 的内容，展示原始字节并说明限制。
 
 ### 威胁 2：恶意仓库的 LFS 指针触发网络请求
 **场景**：`git lfs` 在读取时自动下载大文件，可能泄露信息或消耗带宽。
 **应对**：只读取标准 LFS 指针文件（几行文本），展示 object ID 和 size，**绝不调用 `git lfs` 命令**。
+二进制文件在 diff 中只标记 `binary: true` 与增删计数，**不读取内容**。
 
 ### 威胁 3：恶意 diff 注入 UI
 **场景**：diff 内容包含 HTML/JS，在 UI 中渲染时执行。
-**应对**：diff 渲染使用纯文本 + 语法高亮，**不使用 `dangerouslySetInnerHTML`**，不执行任何来自仓库的内容。
+**应对**：所有 diff 内容都以**文本节点**写入 DOM（`code` / `span` 的 children），
+**不使用 `dangerouslySetInnerHTML`**，不执行任何来自仓库的内容。
 
 ### 威胁 4：恶意 hook 触发
 **场景**：Git 操作触发 `.git/hooks/` 中的脚本。
-**应对**：RepoPrism 只使用不触发 hook 的只读命令（`status`、`log`、`show`、`diff`、`cat-file`、`rev-parse`、`for-each-ref`）。**绝不使用 `git checkout`、`git commit`、`git merge` 等会触发 hook 的命令**。
+**应对**：RepoPrism 只使用不触发 hook 的只读命令（`status`、`log`、`show`、`diff`、`cat-file`、`rev-parse`、`for-each-ref`、`symbolic-ref`）。**绝不使用 `git checkout`、`git commit`、`git merge` 等会触发 hook 的命令**。
 
 ### 威胁 5：AI 生成的代码意外引入写操作
-**场景**：AI Agent 实现功能时调用了 `git commit`。
+**场景**：AI Agent 实现功能时调用了 `git commit`、`git stash pop` 或 `git branch -D`。
 **应对**：CI 中强制静态扫描，见下节。
+
+### 威胁 6：病理仓库导致资源耗尽
+**场景**：一次 diff 体积达到数百 MB，或单文件变更行数极大，拖垮内存与 UI。
+**应对**：单次 diff 解析有 **5000 行上限**；超出后停止解析，并把受影响文件与整体都标记
+`truncated`。截断是**显式**的，用户能看到「已截断」，而不是拿到一份静默缺失的 diff。
+
+---
 
 ## CI 只读扫描
 
-在 `.github/workflows/ci.yml` 中，对 `crates/repo-prism-core` 执行：
+扫描器是 **`scripts/read-only-guard.sh`** —— 它是白名单的**唯一事实来源**，
+本文件不再重复维护一份名单（重复过的名单必然与实现漂移，这正是之前发生过的事）。
+
+在 `.github/workflows/ci.yml` 中：
 
 ```bash
-# 提取所有 git 子命令调用
+# 1. 先自检扫描器本身：正例不误报、反例能被检出
+bash scripts/read-only-guard.sh --self-test
+
+# 2. 再扫描真实代码
+bash scripts/read-only-guard.sh
+```
+
+扫描器自身执行失败（例如 awk 报错）时以**退出码 2** 失败。这一点是刻意的：
+awk 崩掉会让输出为空，若把空输出当作「通过」，就会得到一个「假绿灯」——
+这正是本项目已经踩过一次的坑。
+
+### 三层校验
+
+| 层 | 规则 | 拦住的典型写法 |
+|----|------|---------------|
+| 1 | **动词白名单**：语句内形如 `[a-z][a-z-]*` 的字面量必须是已知只读子命令 | `push`、`commit`、`reset`、`stash pop` 的 `pop` |
+| 2 | **危险选项黑名单**：`-x` / `--xxx` 形式的字面量不得命中危险表 | `git branch -D` 的 `-D`（分支名含 `/` 时单词白名单看不见） |
+| 3 | **条件动词须带只读标志**：`stash` / `branch` / `tag` / `remote` / `worktree` / `config` 必须带 `--list` / `--get` 之类明确读标志 | `git config user.email X`（键含点、值大写，前两层都看不见） |
+
+### 已知边界
+
+扫描器是**静态字面量分析**，不做数据流追踪：把命令拆进运行时拼装的字符串仍可绕过。
+它的价值是拦住**无意之失**（尤其 AI 生成代码时的误用），而非抵御恶意提交。
+真正的兜底仍然是人工审查与本项目的只读承诺。
+
+### 历史教训（保留，避免重蹈）
+
+扫描器最初是一行 shell：
+
+```bash
 grep -rn 'Command::new("git")' crates/repo-prism-core/src/ \
-  | grep -oE 'arg\("[a-z-]+"\)' \
-  | sort -u > /tmp/git-commands.txt
+  | grep -oE 'arg\("[a-z-]+"\)'
+```
 
-# 白名单：只允许这些只读子命令
-ALLOWED="arg(\"status\")
-arg(\"log\")
-arg(\"show\")
-arg(\"diff\")
-arg(\"cat-file\")
-arg(\"rev-parse\")
-arg(\"for-each-ref\")
-arg(\"branch\")
-arg(\"tag\")
-arg(\"remote\")
-arg(\"config\")
-arg(\"ls-files\")
-arg(\"ls-tree\")
-arg(\"rev-list\")
-arg(\"symbolic-ref\")
-arg(\"merge-base\")
-arg(\"describe\")
-arg(\"shortlog\")
-arg(\"blame\")
-arg(\"worktree\")
-arg(\"stash\")"
-
-# 检查是否有白名单外的命令
-while read cmd; do
-  if ! echo "$ALLOWED" | grep -qF "$cmd"; then
-    echo "ERROR: 检测到非白名单 Git 命令: $cmd"
-    exit 1
-  fi
-done < /tmp/git-commands.txt
+它**恒为空**：Rust 链式调用把 `.arg()` 写在后续行，只匹配同一行的 grep 抓不到任何东西；
+同时会把 `--show-toplevel` 这类合法选项误判为子命令。
+一个恒为空的安全检查比没有检查更危险 —— 它会让人误以为边界已被守护。
