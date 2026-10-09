@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# 包管理器统一为 pnpm（见 package.json 的 packageManager 字段）。
+# 误跑 npm install 会生成 package-lock.json，与 pnpm-lock.yaml 形成双锁文件，
+# 让 `pnpm install --frozen-lockfile` 的判定失去意义，故显式忽略。
+package-lock.json
+
 # Rust / Cargo 构建产物
 /target
 **/target
@@ -26,3 +31,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent 工作目录（daily log / 会话备忘），属本地工具数据，不入库
+.workbuddy/

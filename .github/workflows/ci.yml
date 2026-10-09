@@ -14,6 +14,7 @@ jobs:
       # 先自检扫描器本身（正例不误报、反例能检出），再扫描真实代码。
       # 旧实现只检查与 Command::new 同一行的内容，对跨行的链式 .arg()
       # 和数组字面量里的命令完全无效，是假绿灯。详见脚本内注释。
+      # 扫描器自身执行失败会以退出码 2 失败，不会被当成"通过"。
       - name: Self-test the guard
         run: bash scripts/read-only-guard.sh --self-test
       - name: Scan for forbidden Git commands
@@ -32,19 +33,40 @@ jobs:
           components: rustfmt, clippy
       - name: fmt
         run: cargo fmt --all -- --check
+      # --all-targets：连测试代码一起 lint，否则 tests/ 里的 warning 永远不会被发现
       - name: clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  perf:
+    name: Performance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # AGENTS.md 的质量门禁要求「大仓库首屏 < 3s」，各任务卡另有具体指标。
+      # 这一步把它们变成会真实失败的断言；--nocapture 让实测值出现在 CI 日志里，
+      # 便于区分「代码退化」与「runner 抖动」。
+      - name: Performance budget (asserted, not printed)
+        run: cargo test -p repo-prism-core --test perf -- --nocapture
 
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 版本显式钉住，与本地验证过的工具链一致（pnpm 12.10.1 + lockfileVersion 9.0）。
+      #
+      # 为什么不用 package.json 的 packageManager 字段来做单一来源：
+      # 实测（pnpm 12.10.1）一旦写入该字段，pnpm 就会要求把「它自己」也记进
+      # pnpm-lock.yaml（packageManagerDependencies + 158 行 @pnpm/exe.<平台> 记录，
+      # 且锁文件变成双 YAML 文档），否则 --frozen-lockfile 直接失败；
+      # manage-package-manager-versions=false 也拦不住。
+      # 为一行版本声明把锁文件撑大 16% 不划算，故版本以本文件为准。
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 12.10.1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -53,3 +75,5 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # 类型检查与单测都过了，不代表产物能构建出来
+      - run: pnpm build
