@@ -146,6 +146,12 @@ fn snapshot_and_commits_stay_within_budget() {
 ///
 /// 缓存自己的契约（命中时省几次、以及更重要的**引用一变就必须失效**）
 /// 在 `tests/cache.rs`，那里数的是真实子进程次数。
+///
+/// # P-09 之后多了一条 `workspace()`
+///
+/// 工作树列表 + stash 列表需要起进程，所以它们**没有**并进 `snapshot()`，
+/// 而是走独立的 `workspace()`（2 次）。两条约束合起来才是完整的契约：
+/// 快照的次数与「要不要这两块」无关，而 `workspace()` 的次数是确定的 2。
 #[test]
 fn spawn_counts_are_pinned() {
     let repo = TempRepo::new("spawns");
@@ -155,12 +161,25 @@ fn spawn_counts_are_pinned() {
     assert_eq!(git.spawns(), 1, "open() 应只起一次 rev-parse");
 
     let before = git.spawns();
-    git.snapshot().expect("snapshot");
+    let snap = git.snapshot().expect("snapshot");
     assert_eq!(
         git.spawns() - before,
         2,
         "snapshot() 应是 status(1) + for-each-ref(1)；\
          若变成 5，说明有人把分支/标签/HEAD 又拆回了独立子进程（ADR-002 已合并掉）"
+    );
+    // P-09 之后 snapshot() 多了「进行中的操作状态」，但这里**一字未改** ——
+    // 状态是 <git-dir> 下的标志文件探测，一次进程都不起。这条断言就该继续钉住它。
+    assert_eq!(snap.state, None, "这个夹具没有进行中的操作");
+
+    let before = git.spawns();
+    git.workspace().expect("workspace");
+    assert_eq!(
+        git.spawns() - before,
+        2,
+        "workspace() 应是 worktree list(1) + stash list(1)；\
+         它刻意**不**并进 snapshot()，否则快照的次数会随「要不要这两块」变化，\
+         这条门禁就不再是契约（见 SPEC「首屏读取路径的子进程契约」）"
     );
 
     let before = git.spawns();

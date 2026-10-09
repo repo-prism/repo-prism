@@ -91,6 +91,34 @@
 - **回环 HTTP stub 抽为共用模块** `crates/repo-prism-core/tests/common/stub.rs`：
   非阻塞 `accept()` 继承 `O_NONBLOCK`、`Connection: close` 这两个坑**只保留一份**，
   由 `summarizer_http` 与 `summarizer_egress` 共用
+- **进行中的操作状态**（工程补丁 P-09，`RepoSnapshot.state`）
+  - 覆盖合并 / 变基 / 摘取 / 回退 / 二分五种「进行中」状态，变基另带
+    `step` / `total` 进度（取自 `rebase-merge/msgnum` 与 `end`）
+  - **零子进程**：判据是 `<git-dir>` 下标志文件的存在性，一次进程都不起，
+    因此它挂在 `snapshot()` 里而**快照仍是恰好 2 次子进程** ——
+    `perf.rs::spawn_counts_are_pinned` 一字未改
+  - 无操作是 `state: null`，**不是**某个表示「干净」的变体 —— 与 `head.upstream`
+    同构：「没有进行中的操作」是一个缺失，不是一个取值
+  - 状态优先级按**最具体的标记优先**排（`rebase-merge` → `rebase-apply` →
+    摘取 → 回退 → 合并 → 二分）。顺序由真实夹具实测确定：摘取与回退冲突时
+    **不会**顺带留下 `MERGE_HEAD`（本卡实测的第一个问题）
+  - 只观测、不干预：不执行 `merge` / `rebase` / 摘取 / 回退 / 提交的任何写子命令
+- **worktree 与 stash 列表**（工程补丁 P-09，`Git::workspace()`）
+  - `worktree list --porcelain` + `stash list`，合起来 **2 次子进程**
+  - 刻意**不并入** `snapshot()`：那会让快照的次数随「要不要这两块」变化，
+    那条门禁就不再是契约
+  - 前端**默认折叠、展开才取** —— 不展开就不付这两次成本
+  - stash 只列条目，**不展开内容**（`git stash show` 属 US-3 范畴）
+- **工作区状态与列表的测试**（工程补丁 P-09，`tests/workspace.rs`，11 项 + lib 内 14 项纯函数）
+  - 夹具**真的跑 git 去制造**每一种状态：真建分支、真造冲突、真建链接工作树、真 stash
+  - 覆盖裸仓库与分离头指针的工作树（`porcelain` 里**没有** `HEAD` 行，解析器已容错）、
+    锁定标记、stash 说明里含中文与空格（故用 `\x1f` 分隔字段，不按冒号切）
+  - **失败路径已实测**：Rust 侧 9 条 + 前端侧 4 条探针逐个破坏被测逻辑，13/13 变红。
+    其中「状态探测改成起一次子进程」会让 perf 门禁红 —— 它证明「不引入子进程」
+    这条真的被门禁看着，而不只是注释里的一句承诺
+- **前端工作区展示**（P-09）：`RepoStateBadge`（状态角标，变基显示「N/M」）、
+  `WorkspacePanel`（工作树 / stash 列表，默认折叠）、`src/lib/workspace.ts`
+  的纯函数 + 14 条断言
 
 ### Fixed
 

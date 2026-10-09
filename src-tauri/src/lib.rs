@@ -1,7 +1,7 @@
 use repo_prism_core::{
     build_commit_prompt, ChangeAnalysis, CommitDetail, CommitInfo, Diff, Git, LineStats,
-    OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSnapshot, Summarizer, DEFAULT_ENDPOINT,
-    DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS,
+    OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSnapshot, Summarizer, WorkspaceInfo,
+    DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS,
 };
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -119,6 +119,15 @@ fn analyze_changes(path: String, state: State<'_, AppState>) -> Result<ChangeAna
 #[tauri::command]
 fn get_remote_info(path: String, state: State<'_, AppState>) -> Result<Option<RemoteInfo>, String> {
     with_git(&state, &path, |git| git.remote_info())
+}
+
+/// 工作树与 stash 列表（US-1，补丁 P-09）。
+///
+/// **与快照分开的一次调用**：这两项各要一次子进程，而快照的次数是一条被门禁
+/// 钉住的契约。前端只在需要时调它，因此「不展开这两块」就不付这个成本。
+#[tauri::command]
+fn get_workspace(path: String, state: State<'_, AppState>) -> Result<WorkspaceInfo, String> {
+    with_git(&state, &path, Git::workspace)
 }
 
 fn analyze(git: &Git) -> Result<ChangeAnalysis, String> {
@@ -301,6 +310,7 @@ pub fn run() {
             get_diff,
             analyze_changes,
             get_remote_info,
+            get_workspace,
             get_ai_settings,
             set_ai_settings,
             test_ai_connection,

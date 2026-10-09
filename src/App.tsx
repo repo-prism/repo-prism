@@ -6,6 +6,7 @@ import { CommitDetail } from "./components/CommitDetail";
 import { CommitGraph } from "./components/CommitGraph";
 import { IntegrationBar } from "./components/IntegrationBar";
 import { RepoHeader } from "./components/RepoHeader";
+import { WorkspacePanel } from "./components/WorkspacePanel";
 import {
   type AiSettings,
   analyzeChanges,
@@ -163,6 +164,8 @@ export default function App() {
           <aside className="sidebar">
             <RepoHeader snapshot={snapshot} />
             <BranchList branches={snapshot.branches} tags={snapshot.tags} />
+            {/* key 换仓库即重挂载：清掉上一个仓库的工作树 / stash 缓存 */}
+            <WorkspacePanel key={`workspace-${repoPath}`} repoPath={repoPath} />
           </aside>
           <main className="main">
             <IntegrationBar remote={remote} />

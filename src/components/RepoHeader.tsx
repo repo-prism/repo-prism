@@ -1,11 +1,12 @@
 import type { RepoSnapshot, UpstreamInfo } from "../lib/api";
+import { RepoStateBadge } from "./RepoStateBadge";
 
 interface Props {
   snapshot: RepoSnapshot;
 }
 
 export function RepoHeader({ snapshot }: Props) {
-  const { head, path } = snapshot;
+  const { head, path, state } = snapshot;
   return (
     <div className="repo-header">
       <div className="repo-path" title={path}>
@@ -18,6 +19,8 @@ export function RepoHeader({ snapshot }: Props) {
           <span className="branch-chip">{head.branch}</span>
         )}
         <code>{head.commit.slice(0, 8)}</code>
+        {/* 只有进行中的操作才值得一个角标 —— 常态（没有）不占位 */}
+        {state && <RepoStateBadge state={state} />}
       </div>
       <UpstreamLine upstream={head.upstream} />
     </div>

@@ -45,6 +45,11 @@ export interface RepoSnapshot {
   branches: BranchInfo[];
   tags: TagInfo[];
   status: StatusInfo;
+  /**
+   * 进行中的操作（US-1）。**没有**进行中的操作时是 `null`，
+   * 而不是某个表示「干净」的取值 —— 与 `head.upstream` 的 `null` 同构。
+   */
+  state: RepoState | null;
 }
 export interface CommitInfo {
   sha: string;
@@ -119,6 +124,56 @@ export interface CommitDetail {
   patch: string;
   /** 是否因超出上限被截断（原始文本 2 MiB / 结构化 5000 行）。 */
   truncated: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 进行中的操作与工作区列表（US-1，补丁 P-09）
+//
+// `state` 由后端**零子进程**探测（看 <git-dir> 下的标志文件）得出，因此它搭在
+// 快照里；`worktrees` / `stashes` 要起进程，所以单独走 getWorkspace()。
+// ---------------------------------------------------------------------------
+
+/** 仓库正在进行的操作。判据与降级规则见 SPEC 的 US-1。 */
+export type RepoState =
+  | { kind: "merge" }
+  | { kind: "rebase"; step: number | null; total: number | null }
+  | { kind: "cherry_pick" }
+  | { kind: "revert" }
+  | { kind: "bisect" };
+
+export interface WorktreeInfo {
+  path: string;
+  /** 该工作树检出的分支短名；分离头指针时为 `null`。 */
+  branch: string | null;
+  /** 该工作树的 HEAD。bare / 空仓库时为空串。 */
+  commit: string;
+  /** 主工作树。git 保证它排在第一条。 */
+  is_main: boolean;
+  bare: boolean;
+  detached: boolean;
+  locked: boolean;
+}
+
+export interface StashInfo {
+  /** `stash@{0}` 形式的引用。 */
+  reference: string;
+  commit: string;
+  message: string;
+}
+
+export interface WorkspaceInfo {
+  worktrees: WorktreeInfo[];
+  stashes: StashInfo[];
+}
+
+/**
+ * 工作树与 stash 列表。
+ *
+ * 与快照分开取：这两项各要一次子进程，而快照的子进程次数是一条被门禁钉住的
+ * 契约。因此**只在界面上真正需要时才调它**。
+ */
+export async function getWorkspace(path: string): Promise<WorkspaceInfo> {
+  return invoke<WorkspaceInfo>("get_workspace", { path });
 }
 
 export async function inspectRepo(path: string): Promise<RepoSnapshot> {

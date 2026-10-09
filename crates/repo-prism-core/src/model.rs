@@ -9,6 +9,15 @@ pub struct RepoSnapshot {
     pub branches: Vec<BranchInfo>,
     pub tags: Vec<TagInfo>,
     pub status: StatusInfo,
+    /// 进行中的操作（US-1，补丁 P-09）。无操作时为 `None`。
+    ///
+    /// 由 `<git-dir>` 下的标志**文件探测**得出，**不占任何子进程** ——
+    /// 这正是它可以留在快照里、而 `worktrees` / `stashes` 不行的依据。
+    ///
+    /// `#[serde(default)]`：P-09 之前写下的快照 JSON 里没有这个键，
+    /// 加默认值才能继续读出来（对称地，序列化后多出的键对旧客户端是可忽略的）。
+    #[serde(default)]
+    pub state: Option<RepoState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -79,6 +88,85 @@ impl ChangeKind {
             _ => ChangeKind::Unknown,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 进行中的操作与工作区附加信息（US-1，补丁 P-09）
+// ---------------------------------------------------------------------------
+
+/// 仓库**正在进行的操作**。
+///
+/// 判据全部是 `<git-dir>` 下的标志文件，因此探测**零子进程**：
+/// `MERGE_HEAD` / `rebase-merge/` / `rebase-apply/` / `CHERRY_PICK_HEAD` /
+/// `REVERT_HEAD` / `BISECT_LOG`。
+///
+/// 无操作时是 `None`，**不是**某个表示「干净」的变体 —— 与 `HeadInfo.upstream`
+/// 同构：「没有进行中的操作」是一个**缺失**，不是一个取值。
+/// 给它造一个变体，会让「未知」与「确认无操作」混为一谈。
+///
+/// 序列化用 `kind` 作标签：变基那条额外带 `step` / `total` 两个可为 `null` 的字段
+/// （形如 kind=rebase, step=3, total=7）。
+///
+/// 注意别把这里的标签写成带引号的纯小写词 —— 只读扫描器的规则 4 是
+/// **全局**的写动词黑名单，被引号包起来的变基一词会被当成真在调 Git。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RepoState {
+    /// 合并未完成（`MERGE_HEAD` 存在，通常在等冲突解决）。
+    Merge,
+    /// 变基进行中。`step` / `total` 读不到时为 `None` ——
+    /// **报不出进度不等于没在变基**，状态本身仍然成立。
+    Rebase {
+        step: Option<u32>,
+        total: Option<u32>,
+    },
+    /// 摘取提交未完成（`CHERRY_PICK_HEAD` 存在）。
+    CherryPick,
+    /// 回退提交未完成（`REVERT_HEAD` 存在）。
+    Revert,
+    /// 二分查找进行中（`BISECT_LOG` 存在）。
+    Bisect,
+}
+
+/// 一个工作树（US-1）。来自 `git worktree list --porcelain`。
+///
+/// **只读观测**：本结构描述工作树，代码里不存在创建 / 移动 / 删除工作树的路径。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: PathBuf,
+    /// 该工作树检出的分支短名（已削去 `refs/heads/`）。分离头指针时为 `None`。
+    pub branch: Option<String>,
+    /// 该工作树的 HEAD。空仓库 / bare 仓库时为空串。
+    pub commit: String,
+    /// 主工作树。git 保证 `worktree list` 把它排在第一条。
+    pub is_main: bool,
+    pub bare: bool,
+    pub detached: bool,
+    /// 被锁定。只观测，不解除。
+    pub locked: bool,
+}
+
+/// 一条 stash（US-1）。来自 `git stash list`。
+///
+/// `message` 是 stash 的 reflog 主题（形如 `WIP on main: 1a2b3c4 subject`）。
+/// **不读取 stash 的内容** —— 展开 diff 属 US-3 的范畴，本补丁不碰。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StashInfo {
+    /// `stash@{0}` 形式的引用。
+    pub reference: String,
+    pub commit: String,
+    pub message: String,
+}
+
+/// 工作区的附加列表（US-1）。
+///
+/// 与 `RepoSnapshot` **分开取**：这两项各要一次子进程，而快照的子进程次数是
+/// 一条被门禁钉住的契约（`SPEC.md`「首屏读取路径的子进程契约」）。
+/// 分开的第二个好处是「用户没展开这两块就不付这个成本」。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub worktrees: Vec<WorktreeInfo>,
+    pub stashes: Vec<StashInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -145,12 +145,21 @@ impl TempRepo {
 
     /// 执行 git 命令并允许失败（如制造合并冲突）。
     pub fn git_raw(&self, args: &[&str]) -> (bool, String, String) {
+        self.git_at_raw(&self.path, args)
+    }
+
+    /// 在**另一个目录**里执行 git 命令并允许失败。
+    ///
+    /// 用于链接工作树：变基 / 合并这类「进行中操作」的标志写在**每个工作树
+    /// 自己的** git 目录里，所以只有在那个工作树的目录下跑才制造得出来。
+    /// 这也是 P-09 用它验证「标志不住在共享目录里」的方式。
+    pub fn git_at_raw(&self, dir: &std::path::Path, args: &[&str]) -> (bool, String, String) {
         let out = Command::new("git")
             // 隔离真实用户配置，避免污染测试结果
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .args(["-c", "init.defaultBranch=main", "-C"])
-            .arg(&self.path)
+            .arg(dir)
             .args(args)
             .output()
             .expect("failed to run git");

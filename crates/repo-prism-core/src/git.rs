@@ -37,6 +37,15 @@ const REF_PREFIXES: [&str; 3] = ["refs/heads", "refs/tags", "refs/remotes"];
 /// 宁可多起一个子进程，也不要让「算缓存键」比它省下的那次调用更贵。
 const REF_FINGERPRINT_BUDGET: usize = 4 * 1024 * 1024;
 
+/// `git stash list` 的字段格式（US-1，补丁 P-09）。
+///
+/// 与 [`COMMIT_FORMAT`] 同款：`\x1f` 分隔字段、`\x1e` 分隔记录。
+/// stash 的说明文字里可能含冒号、空格甚至换行，用默认的
+/// `stash@{0}: WIP on …` 一行格式去切分会把它切坏。
+///
+/// 三个字段依次是：reflog 选择子（`stash@{0}`）、stash 提交、reflog 主题。
+const STASH_FORMAT: &str = "--format=%gd\x1f%H\x1f%gs\x1e";
+
 /// 一次 `for-each-ref` 的三种视图。
 ///
 /// 合并的理由见 `ADR/002`：`snapshot()` 原先为分支、标签、ref 映射各起一次
@@ -173,6 +182,9 @@ impl Git {
     }
 
     /// 首屏快照。**恰好 2 次子进程**（`status` + 一次 `for-each-ref`）—— 见 `ADR/002`。
+    ///
+    /// P-09 之后它多了 `state`（进行中的操作），但**次数没变**：
+    /// 状态是 `<git-dir>` 下的文件探测，一次进程都不起。
     pub fn snapshot(&self) -> Result<RepoSnapshot> {
         // 分支名、HEAD、上游计数全部来自同一次 `git status --branch` 的头部行
         // （`# branch.head` / `# branch.oid` / `# branch.upstream` / `# branch.ab`）；
@@ -191,6 +203,44 @@ impl Git {
             branches: refs.branches,
             tags: refs.tags,
             status,
+            // 零子进程，所以放得进这条 2 次的契约里
+            state: self.state(),
+        })
+    }
+
+    /// 进行中的操作（US-1，补丁 P-09）。**零子进程**。
+    ///
+    /// 只查 `<git-dir>` 下有没有标志文件，以及变基进度那两个数字文件。
+    /// 链接工作树下的变基、摘取、合并，标志都写在该工作树自己的 `git_dir` 里，
+    /// 所以这里用 `git_dir` 而不是共享的 `common_dir`。
+    pub fn state(&self) -> Option<RepoState> {
+        state_from_markers(&self.git_dir)
+    }
+
+    /// 工作树列表（US-1，补丁 P-09）。**恰好 1 次子进程**。
+    ///
+    /// 用 `--porcelain` 而不是默认的表格输出：后者会按终端宽度对齐到列、
+    /// 按宽度换行，解析它等于把 git 的排版当契约。
+    pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>> {
+        let out = self.run(&["worktree", "list", "--porcelain"])?;
+        Ok(parse_worktrees(out.as_deref().unwrap_or("")))
+    }
+
+    /// stash 列表（US-1，补丁 P-09）。**恰好 1 次子进程**。
+    pub fn stashes(&self) -> Result<Vec<StashInfo>> {
+        let out = self.run(&["stash", "list", STASH_FORMAT])?;
+        Ok(parse_stashes(out.as_deref().unwrap_or("")))
+    }
+
+    /// 工作区的附加列表：工作树 + stash。**恰好 2 次子进程**。
+    ///
+    /// 刻意**不**并进 [`Git::snapshot`]：这两项要起进程，合进去会让快照的次数
+    /// 随「要不要这两块」而变化，那条「与状态无关」的门禁就不再是契约。
+    /// 与 TASK-018 把引用缓存做成 opt-in 是同一条理由。
+    pub fn workspace(&self) -> Result<WorkspaceInfo> {
+        Ok(WorkspaceInfo {
+            worktrees: self.worktrees()?,
+            stashes: self.stashes()?,
         })
     }
 
@@ -611,6 +661,187 @@ fn parse_head_meta(branch_head: Option<&str>, branch_oid: Option<&str>) -> HeadM
     }
 }
 
+/// 由 `<git-dir>` 下的标志推出进行中的操作（US-1，补丁 P-09）。**零子进程**。
+///
+/// # 为什么按这个顺序
+///
+/// **最具体的标记优先**，命中第一个即返回：
+///
+/// ```text
+/// rebase-merge → rebase-apply → CHERRY_PICK_HEAD → REVERT_HEAD → MERGE_HEAD → BISECT_LOG
+/// ```
+///
+/// 变基排在合并之前，是因为变基**自己会**在冲突时留下一份合并状态：
+/// 若不先看变基目录，正在变基的仓库会被报成「合并中」。
+/// 摘取 / 回退同理（它们也停在合并式的冲突上）。
+/// 顺序不是猜的 —— 每一条都由 `tests/workspace.rs` 用真实夹具逐个构造验证。
+///
+/// 抽成纯函数（只碰文件系统、不碰进程）是为了让每条分支都能被断言：
+/// 「同时在场的多个标志报哪一个」「进度读不到时怎么办」这类问题，
+/// 靠一个真实仓库碰运气是测不全的。
+fn state_from_markers(git_dir: &Path) -> Option<RepoState> {
+    let marker = |name: &str| git_dir.join(name);
+
+    // 两种变基后端：`rebase-merge`（默认的 merge 后端）与
+    // `rebase-apply`（`--apply` / `am` 后端）。进度文件名不同。
+    if marker("rebase-merge").is_dir() {
+        let dir = marker("rebase-merge");
+        let (step, total) = (
+            read_number(&dir.join("msgnum")),
+            read_number(&dir.join("end")),
+        );
+        return Some(RepoState::Rebase { step, total });
+    }
+    if marker("rebase-apply").is_dir() {
+        let dir = marker("rebase-apply");
+        let (step, total) = (
+            read_number(&dir.join("next")),
+            read_number(&dir.join("last")),
+        );
+        return Some(RepoState::Rebase { step, total });
+    }
+    if marker("CHERRY_PICK_HEAD").exists() {
+        return Some(RepoState::CherryPick);
+    }
+    if marker("REVERT_HEAD").exists() {
+        return Some(RepoState::Revert);
+    }
+    if marker("MERGE_HEAD").exists() {
+        return Some(RepoState::Merge);
+    }
+    if marker("BISECT_LOG").exists() {
+        return Some(RepoState::Bisect);
+    }
+    None
+}
+
+/// 读一个单行十进制数文件（变基进度的 `msgnum` / `end` / `next` / `last`）。
+///
+/// 读不到、不是数字、或超出 `u32` 都返回 `None`。**调用方不得因此改变状态**：
+/// 报不出进度不等于没在变基。
+fn read_number(path: &Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// 解析 `git worktree list --porcelain`（US-1，补丁 P-09）。
+///
+/// 输出是**空行分隔的记录块**，每块形如（`HEAD` 与分支二选一的那个必有）：
+///
+/// ```text
+/// worktree /path/to/wt          # 必有，块的第一行
+/// HEAD 1a2b3c4                  # 必有
+/// branch refs/heads/main        # 或 detached，二者互斥
+/// bare                          # 可选
+/// locked [原因]                 # 可选
+/// prunable [原因]               # 可选
+/// ```
+///
+/// `branch` 给的是**完整 ref**，这里削成短名 —— 与 `BranchInfo.name` 保持同一口径。
+///
+/// 未知键一律忽略而不是报错：git 版本升级时多出新键是常态，
+/// 为它失败会让整个面板空掉，而少显示一行信息是可接受的降级。
+///
+/// 逐行状态机而非按 `\n\n` 切块：Windows 上 git 的输出行尾是 CRLF，
+/// 按空行字符串切会一块都切不开（`str::lines` 会连行尾的 `\r` 一起去掉）。
+fn parse_worktrees(raw: &str) -> Vec<WorktreeInfo> {
+    let mut out: Vec<WorktreeInfo> = Vec::new();
+    let mut current: Option<WorktreeInfo> = None;
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            if let Some(tree) = current.take() {
+                out.push(tree);
+            }
+            continue;
+        }
+
+        let mut parts = line.splitn(2, ' ');
+        let key = parts.next().unwrap_or("");
+        // 只有 `locked` / `prunable` 会带原因，其余行的值就是全部剩余内容
+        // （路径可能含空格，因此用 splitn(2) 而不是 split）。
+        let value = parts.next().unwrap_or("").trim();
+
+        match key {
+            "worktree" => {
+                if let Some(tree) = current.take() {
+                    out.push(tree);
+                }
+                current = Some(WorktreeInfo {
+                    path: PathBuf::from(value),
+                    branch: None,
+                    commit: String::new(),
+                    // git 保证主工作树是第一条记录
+                    is_main: out.is_empty(),
+                    bare: false,
+                    detached: false,
+                    locked: false,
+                });
+            }
+            "HEAD" => {
+                if let Some(tree) = current.as_mut() {
+                    tree.commit = value.to_string();
+                }
+            }
+            "branch" => {
+                if let Some(tree) = current.as_mut() {
+                    tree.branch = Some(
+                        value
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(value)
+                            .to_string(),
+                    );
+                }
+            }
+            "detached" => {
+                if let Some(tree) = current.as_mut() {
+                    tree.detached = true;
+                }
+            }
+            "bare" => {
+                if let Some(tree) = current.as_mut() {
+                    tree.bare = true;
+                }
+            }
+            "locked" => {
+                if let Some(tree) = current.as_mut() {
+                    tree.locked = true;
+                }
+            }
+            // `prunable` 与未知键：看清了就够了，不为它们建模
+            _ => {}
+        }
+    }
+
+    if let Some(tree) = current.take() {
+        out.push(tree);
+    }
+    out
+}
+
+/// 解析 `git stash list` 的 [`STASH_FORMAT`] 输出（US-1，补丁 P-09）。
+///
+/// 与提交列表同款的 `\x1f` / `\x1e` 分隔。字段数不足 3 的记录整条丢弃 ——
+/// 宁可少一条，也不要吐出一个 `commit` 为空、点进去必报错的假条目。
+fn parse_stashes(raw: &str) -> Vec<StashInfo> {
+    let mut out = Vec::new();
+    for record in raw.split('\x1e') {
+        let record = record.trim_matches(['\n', '\r']);
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.split('\x1f').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        out.push(StashInfo {
+            reference: parts[0].to_string(),
+            commit: parts[1].to_string(),
+            message: parts[2].to_string(),
+        });
+    }
+    out
+}
+
 /// 引用映射的内容指纹（TASK-018）。
 ///
 /// # 为什么不用 mtime
@@ -807,10 +1038,15 @@ fn cap_patch(patch: String) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_patch, parse_ahead_behind, parse_head_meta, parse_remote, MAX_DIFF_BYTES};
+    use super::{
+        cap_patch, parse_ahead_behind, parse_head_meta, parse_remote, parse_stashes,
+        parse_worktrees, read_number, state_from_markers, MAX_DIFF_BYTES,
+    };
+    use crate::model::RepoState;
 
-    // 注意：本模块位于 core/src 下，会被 read-only guard 扫描，
-    // 因此断言里的字面量只使用非「纯小写单词」形式。
+    // 注意：本模块位于 core/src 下，会被 read-only guard 扫描。
+    // 第四层（写动词黑名单）**全局生效、不看语句是否在调 Git**，所以这里
+    // 不出现任何被引号包起来的写动词字面量（连注释里也不行）。
 
     #[test]
     fn head_meta_reads_porcelain_v2_headers() {
@@ -957,5 +1193,279 @@ mod tests {
             "没有 owner"
         );
         assert!(parse_remote("").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // P-09：进行中状态的标志探测（零子进程）
+    // -----------------------------------------------------------------------
+
+    /// 建一个进程内唯一的临时目录。
+    ///
+    /// 刻意**不**复用 `tests/common` 的 `TempRepo` —— 那个夹具会 `git init`，
+    /// 而这一组用例测的正是「一个进程都不起」这件事：给一个空目录就够，
+    /// 顺便也证明了标志探测根本不需要仓库。
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch")
+            .as_nanos();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("repoprism-state-{tag}-{nanos}-{seq}"));
+        std::fs::create_dir_all(&path).expect("failed to create temp dir");
+        path
+    }
+
+    fn write_marker(dir: &std::path::Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).expect("failed to write marker");
+    }
+
+    #[test]
+    fn state_is_none_when_no_marker_is_present() {
+        let dir = temp_dir("marker-order");
+        // 目录里有正常文件也不该被误判 —— 只有标志文件算数
+        write_marker(&dir, "HEAD", "ref: refs/heads/main\n");
+
+        assert_eq!(state_from_markers(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_prefers_the_most_specific_marker() {
+        let dir = temp_dir("priority");
+
+        // 变基自己在冲突时会留下一份合并状态，所以变基必须压过合并
+        write_marker(&dir, "MERGE_HEAD", "1a2b3c4\n");
+        write_marker(&dir, "CHERRY_PICK_HEAD", "1a2b3c4\n");
+        std::fs::create_dir_all(dir.join("rebase-merge")).expect("mkdir rebase-merge");
+        assert_eq!(
+            state_from_markers(&dir),
+            Some(RepoState::Rebase {
+                step: None,
+                total: None
+            }),
+            "变基目录在场时应报变基，而不是合并"
+        );
+
+        // 拿掉变基目录，摘取提示压过合并提示
+        std::fs::remove_dir_all(dir.join("rebase-merge")).expect("rmdir marker");
+        assert_eq!(state_from_markers(&dir), Some(RepoState::CherryPick));
+
+        // 再拿掉摘取，轮到回退
+        std::fs::remove_file(dir.join("CHERRY_PICK_HEAD")).expect("unlink marker");
+        write_marker(&dir, "REVERT_HEAD", "1a2b3c4\n");
+        assert_eq!(state_from_markers(&dir), Some(RepoState::Revert));
+
+        // 只剩合并
+        std::fs::remove_file(dir.join("REVERT_HEAD")).expect("unlink marker");
+        assert_eq!(state_from_markers(&dir), Some(RepoState::Merge));
+
+        // 最后才轮到二分查找
+        std::fs::remove_file(dir.join("MERGE_HEAD")).expect("unlink marker");
+        write_marker(&dir, "BISECT_LOG", "记录\n");
+        assert_eq!(state_from_markers(&dir), Some(RepoState::Bisect));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rebase_reads_progress_from_both_backend_layouts() {
+        // 默认的合并后端：msgnum / end
+        let root = temp_dir("rebase-merge");
+        let dir = root.join("rebase-merge");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_marker(&dir, "msgnum", "3\n");
+        write_marker(&dir, "end", "7\n");
+        assert_eq!(
+            state_from_markers(&root),
+            Some(RepoState::Rebase {
+                step: Some(3),
+                total: Some(7)
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 打补丁后端：next / last
+        let root = temp_dir("rebase-apply");
+        let dir = root.join("rebase-apply");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_marker(&dir, "next", "1\n");
+        write_marker(&dir, "last", "2\n");
+        assert_eq!(
+            state_from_markers(&root),
+            Some(RepoState::Rebase {
+                step: Some(1),
+                total: Some(2)
+            })
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 进度读不到时**只降级进度，不改变状态**：
+    /// 「报不出第几步」与「没在变基」是两件事。
+    #[test]
+    fn rebase_without_readable_progress_is_still_a_rebase() {
+        let root = temp_dir("rebase-noprogress");
+        let dir = root.join("rebase-merge");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        assert_eq!(
+            state_from_markers(&root),
+            Some(RepoState::Rebase {
+                step: None,
+                total: None
+            }),
+            "进度文件缺失时状态仍成立"
+        );
+
+        write_marker(&dir, "msgnum", "not-a-number\n");
+        write_marker(&dir, "end", "7\n");
+        assert_eq!(
+            state_from_markers(&root),
+            Some(RepoState::Rebase {
+                step: None,
+                total: Some(7)
+            }),
+            "进度不是数字时只丢那一侧"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn read_number_accepts_only_a_single_plain_decimal() {
+        let dir = temp_dir("numbers");
+        let file = dir.join("progress");
+
+        std::fs::write(&file, " 42 \n").expect("write");
+        assert_eq!(read_number(&file), Some(42), "两侧空白应被容忍");
+
+        std::fs::write(&file, "42\n7\n").expect("write");
+        assert_eq!(read_number(&file), None, "两行不是合法进度");
+
+        std::fs::write(&file, "-1\n").expect("write");
+        assert_eq!(read_number(&file), None, "负数不是合法进度");
+
+        assert_eq!(read_number(&dir.join("absent")), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // P-09：worktree / stash 列表解析
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn worktrees_parse_main_and_linked_entries() {
+        let raw = "worktree /repos/main\n\
+HEAD 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b\n\
+branch refs/heads/main\n\n\
+worktree /repos/linked\n\
+HEAD 5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e\n\
+detached\n\n";
+
+        let trees = parse_worktrees(raw);
+
+        assert_eq!(trees.len(), 2);
+        assert_eq!(trees[0].path, std::path::PathBuf::from("/repos/main"));
+        assert_eq!(
+            trees[0].branch.as_deref(),
+            Some("main"),
+            "refs/heads/ 前缀必须削掉，与分支列表同一口径"
+        );
+        assert!(trees[0].is_main, "第一条记录是主工作树");
+        assert!(!trees[0].detached, "有分支名就不是分离头指针");
+
+        assert_eq!(trees[1].path, std::path::PathBuf::from("/repos/linked"));
+        assert_eq!(trees[1].branch, None, "分离头指针的工作树没有分支名");
+        assert!(trees[1].detached);
+        assert!(!trees[1].is_main);
+    }
+
+    #[test]
+    fn worktrees_keep_paths_that_contain_spaces() {
+        let raw = "worktree /repos/my repo\nHEAD 1a2b3c4\nbranch refs/heads/main\n\n";
+
+        let trees = parse_worktrees(raw);
+        assert_eq!(trees[0].path, std::path::PathBuf::from("/repos/my repo"));
+    }
+
+    /// Windows 上 git 的输出是 CRLF。按空行字符串切块会**一块也切不开**，
+    /// 因此这里用逐行状态机，并钉住 CRLF 能被吃下。
+    #[test]
+    fn worktrees_tolerate_crlf_and_keys_with_a_reason() {
+        let raw = "worktree C:\\repos\\main\r\n\
+HEAD 1a2b3c4\r\n\
+branch refs/heads/main\r\n\
+locked 维护中\r\n\r\n";
+
+        let trees = parse_worktrees(raw);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].branch.as_deref(), Some("main"));
+        assert!(trees[0].locked, "带原因的 locked 行也要认出来");
+        assert!(!trees[0].bare);
+    }
+
+    #[test]
+    fn worktrees_mark_bare_entries() {
+        let raw = "worktree /repos/bare\nHEAD 1a2b3c4\nbare\n\n";
+
+        let trees = parse_worktrees(raw);
+        assert_eq!(trees.len(), 1);
+        assert!(trees[0].bare);
+        assert_eq!(trees[0].branch, None, "bare 工作树没有检出的分支");
+    }
+
+    /// 未知键忽略而不是报错：git 版本升级时加键是常态，
+    /// 为它失败会让整个面板空掉，而少显示一行是可接受的降级。
+    #[test]
+    fn worktrees_ignore_keys_they_do_not_model() {
+        let raw = "worktree /repos/main\n\
+HEAD 1a2b3c4\n\
+branch refs/heads/main\n\
+prunable gitdir 文件缺失\n\
+some-future-key 值\n\n";
+
+        let trees = parse_worktrees(raw);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn worktrees_of_empty_output_is_an_empty_list() {
+        assert!(parse_worktrees("").is_empty());
+    }
+
+    #[test]
+    fn stashes_parse_every_field() {
+        let raw = "stash@{0}\x1f1a2b3c4\x1fWIP on main: 5d6e7f8 second\n\x1e\
+stash@{1}\x1f9f8e7d6\x1fWIP on main: 1a2b3c4 first\n\x1e";
+
+        let stashes = parse_stashes(raw);
+
+        assert_eq!(stashes.len(), 2);
+        assert_eq!(stashes[0].reference, "stash@{0}");
+        assert_eq!(stashes[0].commit, "1a2b3c4");
+        assert_eq!(stashes[0].message, "WIP on main: 5d6e7f8 second");
+        assert_eq!(stashes[1].reference, "stash@{1}");
+        assert_eq!(stashes[1].commit, "9f8e7d6");
+    }
+
+    /// 字段不足的记录**整条丢弃**：宁可少一条，也不要吐出一个
+    /// `commit` 为空、点进去必报错的假条目。
+    #[test]
+    fn stashes_drop_records_that_lose_a_field() {
+        let raw = "stash@{0}\x1fall-good\x1f完整说明\n\x1estash@{1}\x1f\n\x1e";
+
+        let stashes = parse_stashes(raw);
+        assert_eq!(stashes.len(), 1);
+        assert_eq!(stashes[0].reference, "stash@{0}");
+    }
+
+    #[test]
+    fn stashes_of_empty_output_is_an_empty_list() {
+        assert!(parse_stashes("").is_empty());
     }
 }

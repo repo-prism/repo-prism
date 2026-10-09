@@ -41,7 +41,20 @@
     与工作区状态**共用同一次子进程调用**，不额外起 `rev-list --count`。
   - 分支**未设置上游**时必须返回 `null`，不得退化为 `ahead=0, behind=0`
     ——「与上游同步」和「没有上游」是两种不同状态。
-- `[待实现]` worktree、stash、合并/变基进行中状态
+- `[已实现]` worktree 列表、stash 列表、**进行中的操作状态**
+  （合并 / 变基 / cherry-pick / revert / bisect）
+  - 状态探测**不占任何子进程**：直接看 `<git-dir>` 下的标志（`MERGE_HEAD` /
+    `rebase-merge/` / `rebase-apply/` / `CHERRY_PICK_HEAD` / `REVERT_HEAD` / `BISECT_LOG`），
+    进度取自 `rebase-merge/{msgnum,end}`（或 `rebase-apply/{next,last}`）。
+    它因此可以挂在 `snapshot()` 里**而不改变**「恰好 2 次子进程」的契约（见下）。
+    `<git-dir>` 是**每个工作树各一份**的那个目录（TASK-018 的 `git_dir`）——
+    这些标志也正是在那里。
+  - worktree 与 stash 列表需要起进程（`worktree list --porcelain` 与
+    `stash list`，各 1 次），因此**不放进快照**，单独由 `Git::workspace()` 取。
+    与 TASK-018 把引用缓存做成 opt-in 同一条理由：不让一个方法有随状态变化的成本。
+  - 对进行中的操作**只观测、不干预**：不执行 `merge` / `rebase` / `cherry-pick` /
+    `commit` / `stash` 任何写子命令。`worktree` / `stash` 是「条件动词」，
+    只允许带只读标志的 `list` 形式（`read-only-guard.sh` 第三层）。
 
 ### US-2：查看变更（P0）
 
@@ -202,8 +215,13 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 
 - `snapshot()` 恰好 **2** 次 `git` 子进程（`status` + 一次 `for-each-ref`）
 - `snapshot() + commits()` 恰好 **4** 次
+- `workspace()` 恰好 **2** 次（`worktree list` + `stash list`）
 - 门禁：`tests/perf.rs::spawn_counts_are_pinned`，逐方法钉住次数；
   诊断基准 `tests/scale.rs`（`#[ignore]`）
+
+> P-09 给 `snapshot()` 加了「进行中的操作状态」，**次数仍是 2、门禁未动** ——
+> 状态是文件探测，不起进程。这也是它被放进快照的依据：零成本的字段可以进来，
+> 要起进程的 worktree / stash 则另走 `workspace()`。
 
 `[已实现]` 分支名与 HEAD 取自 `git status --porcelain=v2 --branch` 的
 `# branch.head` / `# branch.oid` 头部行，**不另起** `symbolic-ref` / `rev-parse HEAD`。
@@ -307,7 +325,8 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | LLM 摘要   | 本地模型（Ollama，回环地址）  | P1     | 已实现（默认关闭） |
 | 虚拟滚动   | 前端渲染层，无新增数据源      | P0     | 已实现     |
 | 图片 / 字节预览 | `git cat-file`         | P0     | 待实现     |
-| worktree / stash 状态 | `worktree list` / `stash list` | P0 | 待实现 |
+| worktree / stash 列表 | `worktree list --porcelain` / `stash list` | P0 | 已实现 |
+| 进行中操作状态 | `<git-dir>` 下的标志文件（零子进程） | P0 | 已实现 |
 | 文件热度   | `git log --numstat`         | P2     | 待实现     |
 | PR/MR      | `gh` CLI / API              | P2     | 待实现     |
 | 多仓库     | 本地配置                    | P2     | 待实现     |
@@ -319,7 +338,11 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 
 | 结构 | 用途 |
 |------|------|
-| `RepoSnapshot` | 仓库快照：`path` / `head` / `branches` / `tags` / `status` |
+| `RepoSnapshot` | 仓库快照：`path` / `head` / `branches` / `tags` / `status` / `state` |
+| `RepoState` | 进行中的操作：`merge` / `rebase{step,total}` / `cherry_pick` / `revert` / `bisect`；无操作时 `state` 为 `null` |
+| `WorkspaceInfo` | `worktrees: WorktreeInfo[]` + `stashes: StashInfo[]`（`Git::workspace()` 产出） |
+| `WorktreeInfo` | `path` / `branch`（分离时 `null`）/ `commit` / `bare` / `detached` / `locked` / `is_main` |
+| `StashInfo` | `reference`（`stash@{n}`）/ `commit` / `message` |
 | `HeadInfo` | `branch`（detached 时为 `null`）/ `commit` / `detached` / `upstream` |
 | `UpstreamInfo` | `name` / `ahead` / `behind` |
 | `BranchInfo` / `TagInfo` | 名称 + 指向的提交 |
@@ -344,8 +367,10 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 **仅存在于 Tauri 层、不进 core 的类型**：`AiSettings`（设置面板的
 `enabled` / `endpoint` / `model`，落盘于用户配置目录）。core 只知道 `OllamaConfig`。
 
-**尚未落地**：`RepoSnapshot` 目前不含 `worktrees` / `stashes`（US-1 待实现部分），
-模型里也没有对应结构——不留「先声明后实现」的空壳字段。
+**尚未落地**：没有「先声明后实现」的空壳字段。`RepoSnapshot.state` 与
+`WorkspaceInfo` 的每个字段都在当前版本由真实数据填充（P-09）。
+`RepoSnapshot` **仍不含** `worktrees` / `stashes` —— 那两项要起进程，刻意留在
+`Git::workspace()` 里，以保住快照的子进程契约（见「首屏读取路径的子进程契约」）。
 
 ## 边界与不做的事
 
