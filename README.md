@@ -10,10 +10,11 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 - 🌳 **提交图**：分支、标签、HEAD、父子关系 ✅
 - 📝 **变更分组**：冲突 / 已暂存 / 工作区 ✅
 - 🔍 **Diff**：统一 / 并排视图，含 Git 原始行号 ✅
+- 🖼️ **图片对比 / 媒体预览 / 字节预览** —— 计划中
 - 📄 **文本化仓库**：一键导出 LLM 友好纯文本 —— 计划中
 - 🏗️ **架构图**：集成 GitDiagram —— 计划中
 - 📚 **AI 文档**：集成 DeepWiki —— 计划中
-- 🤖 **Agent 协同**：CLI ✅ / Skill 计划中 / MCP Server 计划中
+- 🤖 **Agent 协同**：CLI ✅ / Skill ✅ / MCP Server ✅
 
 功能状态以 [`SPEC.md`](SPEC.md) 为唯一事实来源；上表未标 ✅ 的能力**尚未实现**。
 
@@ -34,12 +35,21 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 ## 快速开始
 
 ```bash
-# CLI：输出只读 JSON 快照
+# CLI：只读快照（所有 --json 输出共用同一 schema 信封）
 repoprism inspect . --json
+repoprism commits . --limit 50 --json
+repoprism detail . --sha <sha> --json
+
+# Agent：取出打包好的 Skill
+repoprism skill --path      # 打印展开目录
+repoprism skill --print     # 直接打印内容
 
 # 桌面应用（开发模式）
 pnpm tauri dev
 ```
+
+MCP Server 见 [`crates/repo-prism-mcp/README.md`](crates/repo-prism-mcp/README.md)，
+Agent 使用说明见 [`skill/SKILL.md`](skill/SKILL.md)。
 
 ## 开发
 
@@ -68,6 +78,6 @@ bash scripts/read-only-guard.sh
 | `SPEC.md` | 唯一需求来源，含每条能力的实现状态 |
 | `SECURITY.md` | 只读安全模型、威胁模型、CI 扫描说明 |
 | `AGENTS.md` | 与 AI Agent 的协作协议与只读宪法 |
-| `ROADMAP.md` | 现状盘点与阶段计划 |
-| `TASKS/` | 任务卡（每张含目标 / 约束 / 验收标准） |
+| `ROADMAP.md` | 产品血统、编号规则与阶段计划 |
+| `TASKS/` | 任务卡（血统编号；工程补丁见 `TASKS/patch/`） |
 | `ADR/` | 架构决策记录 |
