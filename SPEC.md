@@ -183,6 +183,23 @@ stub 的响应形状是我们自己写的，证明不了真实 Ollama 的字段�
 | 出网   | 唯一出网点是回环地址上的本地模型服务，默认关闭 |
 | 发布   | 三处版本号一致；产物为 draft，人工确认后发布 |
 
+`[已实现]` **首屏读取路径的子进程契约**（`ADR/002`）：
+
+- `snapshot()` 恰好 **2** 次 `git` 子进程（`status` + 一次 `for-each-ref`）
+- `snapshot() + commits()` 恰好 **4** 次
+- 门禁：`tests/perf.rs::spawn_counts_are_pinned`，逐方法钉住次数；
+  诊断基准 `tests/scale.rs`（`#[ignore]`）
+
+`[已实现]` 分支名与 HEAD 取自 `git status --porcelain=v2 --branch` 的
+`# branch.head` / `# branch.oid` 头部行，**不另起** `symbolic-ref` / `rev-parse HEAD`。
+`(detached)` / `(initial)` 占位值与头部行缺失时的降级由 `parse_head_meta` 的纯函数单测钉住。
+
+**为什么契约是「子进程次数」而不是毫秒**：实测表明耗时几乎完全由子进程数决定 ——
+4 万提交仓库上的 `for-each-ref` 与**完全不读仓库**的 `git --version` 耗时量级相同；
+提交数 1 万 → 4 万，`snapshot()` 耗时无系统性变化。
+而毫秒阈值会随 runner 抖动（实测同机连跑三次 `snapshot()` 得 208/470/576ms），
+足以让门禁随机变红。**子进程次数是确定性的，毫秒不是。**
+
 ### 出网（本地模型）
 
 `[已实现]` `repo-prism-core` 是唯一出网的 crate，且出网范围被硬编码收窄：

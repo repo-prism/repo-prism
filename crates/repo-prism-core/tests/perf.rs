@@ -113,3 +113,80 @@ fn snapshot_and_commits_stay_within_budget() {
         "commits({PAGE_SIZE}, 0) 超出预算：{SAMPLES} 次采样 {commits_best:?}（最小），预算 {COMMITS_BUDGET:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 子进程次数门禁（ADR-002）
+// ---------------------------------------------------------------------------
+
+/// **性能契约：子进程次数。**
+///
+/// `ADR/002` 的实测结论是：耗时几乎完全由「起了几个 `git` 进程」决定，
+/// 与仓库大小无关 —— 4 万提交仓库上的 `for-each-ref`（约 29ms）与
+/// 完全不读仓库的 `git --version`（约 26ms）耗时相同，即每条命令 85% 以上的
+/// 时间花在起进程上。提交数从 1 万涨到 4 万，`snapshot()` 耗时没有变化。
+///
+/// 所以**「起了几次」就是性能本身**，而它是一个比毫秒更适合做门禁的量：
+///
+/// | | 毫秒阈值 | spawn 次数 |
+/// |---|---|---|
+/// | 随 runner 抖动 | 会（实测同机连跑三次 208/470/576ms） | 不会 |
+/// | 本机与 CI 可比 | 否 | 是 |
+/// | 能否定位到具体退化 | 不能，只知「变慢了」 | 能，指出是哪个方法多起了进程 |
+///
+/// 这条断言在任何机器上都成立，因此它比上面的毫秒阈值更硬。
+/// **改动 `git.rs` 的任何公开方法后都要先看这里。**
+#[test]
+fn spawn_counts_are_pinned() {
+    let repo = TempRepo::new("spawns");
+    repo.seed_fast_import(50);
+    let git = Git::open(repo.path()).expect("open repo");
+
+    assert_eq!(git.spawns(), 1, "open() 应只起一次 rev-parse");
+
+    let before = git.spawns();
+    git.snapshot().expect("snapshot");
+    assert_eq!(
+        git.spawns() - before,
+        2,
+        "snapshot() 应是 status(1) + for-each-ref(1)；\
+         若变成 5，说明有人把分支/标签/HEAD 又拆回了独立子进程（ADR-002 已合并掉）"
+    );
+
+    let before = git.spawns();
+    git.commits(20, 0).expect("commits");
+    assert_eq!(
+        git.spawns() - before,
+        2,
+        "commits() 应是 log(1) + for-each-ref(1)"
+    );
+
+    let sha = git.commits(1, 0).expect("head commit")[0].sha.clone();
+
+    let before = git.spawns();
+    git.commit(&sha).expect("commit");
+    assert_eq!(git.spawns() - before, 2, "commit() 应是 log(1) + refs(1)");
+
+    let before = git.spawns();
+    git.commit_detail(&sha).expect("commit_detail");
+    assert_eq!(
+        git.spawns() - before,
+        4,
+        "commit_detail() 应是 commit(2) + name-status(1) + patch(1)"
+    );
+
+    let before = git.spawns();
+    git.working_tree_stats().expect("working_tree_stats");
+    assert_eq!(
+        git.spawns() - before,
+        2,
+        "working_tree_stats() 是两次 --numstat（索引 vs HEAD、工作区 vs 索引）"
+    );
+
+    let before = git.spawns();
+    let _ = git.remote_info().expect("remote_info");
+    assert_eq!(git.spawns() - before, 1, "remote_info() 应只起一次");
+
+    let before = git.spawns();
+    git.diff(None, None).expect("diff");
+    assert_eq!(git.spawns() - before, 2, "diff() 是 names(1) + patch(1)");
+}

@@ -6,8 +6,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **首屏读取路径的子进程次数减半**（`ADR-002` / `TASK-017`）
+
+  | | 前 | 后 |
+  |---|---|---|
+  | `snapshot()` | 5 次 | **2 次** |
+  | `snapshot()` + `commits()` | 7 次 | **4 次** |
+
+  - 分支、标签、ref 映射由**三次** `for-each-ref` 合并为**一次**
+  - 分支名与 HEAD 改从 `status --porcelain=v2 --branch` 的
+    `# branch.head` / `# branch.oid` 头部行取，省掉 `symbolic-ref` 与 `rev-parse HEAD`
+  - **行为逐字保持不变**：既有 16 个 `snapshot` 集成测试（含分离头指针、无提交仓库、
+    上游 ahead/behind）全部通过
+
 ### Added
 
+- **机器无关的性能门禁**：`Git::spawns()` 暴露本实例发起的子进程次数，
+  `tests/perf.rs::spawn_counts_are_pinned` 逐方法钉住次数。
+  实测显示耗时几乎完全由子进程数决定（4 万提交仓库上的 `for-each-ref` 与
+  不读仓库的 `git --version` 耗时量级相同），而毫秒阈值会随 runner 抖动。
+- **规模诊断基准** `crates/repo-prism-core/tests/scale.rs`（`#[ignore]`，不进 CI 常跑）：
+  按 1k / 10k / 40k 提交扫描 `snapshot()` / `commits()`，逐个拆解子命令，
+  并用 A/B 序列对比测量合并收益。保留「改动前」的 argv 序列作为可重测的对照。
+- **`ADR/002`**：Git 后端演进决策 —— **否决**把系统 Git 换成 `gix`，
+  理由与「什么条件下重估」都写进了文档。
 - **本地模型 HTTP 路径的真实覆盖**（工程补丁 P-07，
   `crates/repo-prism-core/tests/summarizer_http.rs`）
   - 用 `std::net::TcpListener` 在 127.0.0.1 上起 stub（**不引新依赖**），
@@ -19,6 +43,8 @@
 
 ### Fixed
 
+- `ref_map()` / `branches()` / `tags()` 原先各自发起一次 `for-each-ref`，
+  读的是同一份引用表。现已合并为一次（`ADR-002` 实测的直接副产品）。
 - `summarizer.rs` 中真正发送请求的两处 `ureq` 调用此前**一次都没被执行过**
   （本机没有 Ollama），而 `SPEC.md` / `SECURITY.md` 把「不把代码送到外部」
   声明为**只由测试兜底**——那条防线是空的。
@@ -27,6 +53,16 @@
 - 测试本身也验证过**会失败**：用 5 个探针逐个破坏被测逻辑
   （尾斜杠拼接 / 取值字段名 / 空响应过滤 / 出网 body 注入绝对路径 / 报错文案），
   每一步都有对应用例变红。
+
+### 已知边界（本次未解决）
+
+- **「省了多少毫秒」在本机无法可靠测量**：同一方案在同一轮 A/B 内两次采样差 2.7 倍
+  （543ms 与 203ms），**方案间的差异小于方案内的抖动**。干净轮测得 55%、加载轮测得 32%。
+  因此本次**不承诺任何百分比**，验收标准只放在确定性的子进程次数上。
+  要拿到可信的毫秒收益，需要在有真实大仓库且负载可控的环境里复测。
+- **本地 AI 层仍无真实模型验证**：`summarizer_http` 覆盖的是**我们这一侧**的 HTTP 路径，
+  而 stub 的响应形状是我们自己写的 —— 它证明不了真实 Ollama 的字段名与行为与假设一致。
+  `SPEC.md` US-7 该项仍是 `[待实现]`。
 
 ## [0.2.0] - 2026-10-09
 

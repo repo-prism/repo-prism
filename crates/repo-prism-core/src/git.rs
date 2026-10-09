@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `git log` 的字段格式：`\x1f` 分隔字段、`\x1e` 分隔记录，
 /// 避免提交信息中的换行、制表符、`|` 等字符造成解析歧义。
@@ -16,12 +17,48 @@ const MAX_DIFF_LINES: usize = 5_000;
 /// 单次提交原始 diff 文本的上限（2 MiB）。超出即截断并**显式标注**。
 const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 
+/// `for-each-ref` 的统一格式（ADR-002）：一次调用同时喂给分支、标签与提交的 ref 标注。
+///
+/// 字段顺序：`objectname` \t `refname:short` \t `refname` \t `HEAD`。
+/// 带上完整的 `refname` 才能按前缀区分 heads / tags / remotes；
+/// 只靠 `refname:short` 无法区分（分支与标签可能同名）。
+const REF_FORMAT: &str = "--format=%(objectname)%09%(refname:short)%09%(refname)%09%(HEAD)";
+
+/// 一次 `for-each-ref` 的三种视图。
+///
+/// 合并的理由见 `ADR/002`：`snapshot()` 原先为分支、标签、ref 映射各起一次
+/// `for-each-ref`，而三者读的是同一份引用表 —— 实测每起一次子进程约 30ms，
+/// 三次合并成一次是把 `snapshot()` 从 5 次 spawn 降到 2 次的主要来源。
+struct Refs {
+    branches: Vec<BranchInfo>,
+    tags: Vec<TagInfo>,
+    /// sha → 指向它的引用短名，用于给提交列表打 ref 标签。
+    by_sha: HashMap<String, Vec<String>>,
+}
+
+/// 从 `status --porcelain=v2 --branch` 的头部行里拿到的分支与 HEAD。
+///
+/// 这两项原先各要一次 `symbolic-ref` / `rev-parse HEAD`；porcelain v2 的
+/// `# branch.head` 与 `# branch.oid` 已经给了，合并掉可以省两次子进程。
+struct HeadMeta {
+    branch: Option<String>,
+    commit: String,
+    detached: bool,
+}
+
 /// Git 只读读取器。
 ///
 /// **安全约束**：只允许白名单内的只读命令。
 /// CI 会静态扫描本文件的 `Command::new("git")` 调用。
 pub struct Git {
     repo: PathBuf,
+    /// 本实例自 `open()` 起发起的 `git` 子进程次数。
+    ///
+    /// 存在的理由（`ADR/002`）：实测表明**耗时几乎完全由子进程数决定**，
+    /// 与仓库大小无关（4 万提交仓库上的 `for-each-ref` 与 `git --version`
+    /// 耗时相同）。因此「spawn 次数」是一个**与机器无关**的性能契约，
+    /// 比毫秒阈值更适合做回归门禁 —— 毫秒数会随 runner 抖动，spawn 数不会。
+    spawns: AtomicUsize,
 }
 
 impl Git {
@@ -38,42 +75,67 @@ impl Git {
             anyhow::bail!("not a git repository: {}", path.display());
         }
         let repo = String::from_utf8(out.stdout)?.trim().to_string();
-        Ok(Self { repo: repo.into() })
+        Ok(Self {
+            repo: repo.into(),
+            spawns: AtomicUsize::new(1),
+        })
+    }
+
+    /// 本实例自 `open()`（含 `open()` 自己那一次）起发起的 `git` 子进程次数。
+    ///
+    /// 供性能回归断言使用。**开销可忽略**（一次 relaxed 原子读）。
+    pub fn spawns(&self) -> usize {
+        self.spawns.load(Ordering::Relaxed)
     }
 
     pub fn path(&self) -> &Path {
         &self.repo
     }
 
+    /// 首屏快照。**恰好 2 次子进程**（`status` + 一次 `for-each-ref`）—— 见 `ADR/002`。
     pub fn snapshot(&self) -> Result<RepoSnapshot> {
-        // 上游计数与工作区状态来自同一次 `git status` 调用，不额外起子进程。
-        let (status, upstream) = self.status()?;
+        // 分支名、HEAD、上游计数全部来自同一次 `git status --branch` 的头部行
+        // （`# branch.head` / `# branch.oid` / `# branch.upstream` / `# branch.ab`）；
+        // 分支列表、标签列表与 ref 映射来自同一次 `for-each-ref`。
+        // 这两条合并把 snapshot 从 5 次子进程降到 2 次，是全项目唯一值得优化的地方。
+        let (status, upstream, meta) = self.status()?;
+        let refs = self.refs()?;
         Ok(RepoSnapshot {
             path: self.repo.clone(),
-            head: self.head(upstream)?,
-            branches: self.branches()?,
-            tags: self.tags()?,
+            head: HeadInfo {
+                branch: meta.branch,
+                commit: meta.commit,
+                detached: meta.detached,
+                upstream,
+            },
+            branches: refs.branches,
+            tags: refs.tags,
             status,
         })
     }
 
     /// 读取提交图。
+    ///
+    /// **恰好 2 次子进程**：`git log` + 一次 `for-each-ref`（ref 映射）。
     pub fn commits(&self, limit: usize, skip: usize) -> Result<Vec<CommitInfo>> {
         let n = format!("-n{}", limit);
         let s = format!("--skip={}", skip);
         let fmt = format!("--format={}", COMMIT_FORMAT);
         let out = self.run(&["log", "--all", "--date=iso-strict", &fmt, &n, &s])?;
 
-        let refs = self.ref_map()?;
-        Ok(Self::parse_commits(out.as_deref().unwrap_or(""), &refs))
+        let refs = self.refs()?;
+        Ok(Self::parse_commits(
+            out.as_deref().unwrap_or(""),
+            &refs.by_sha,
+        ))
     }
 
     /// 读取单个提交的元信息。
     pub fn commit(&self, sha: &str) -> Result<CommitInfo> {
         let fmt = format!("--format={}", COMMIT_FORMAT);
         let out = self.run(&["log", "--max-count=1", "--date=iso-strict", &fmt, sha])?;
-        let refs = self.ref_map()?;
-        Self::parse_commits(out.as_deref().unwrap_or(""), &refs)
+        let refs = self.refs()?;
+        Self::parse_commits(out.as_deref().unwrap_or(""), &refs.by_sha)
             .into_iter()
             .next()
             .with_context(|| format!("commit not found: {sha}"))
@@ -207,106 +269,83 @@ impl Git {
         Ok(Diff { files, truncated })
     }
 
-    fn ref_map(&self) -> Result<HashMap<String, Vec<String>>> {
+    /// 一次 `for-each-ref` 同时给出分支、标签与「sha → 引用短名」映射（`ADR/002`）。
+    ///
+    /// 原先这是三次独立调用，读的却是同一张引用表。合并后**总输出顺序不变**：
+    /// 原来 `ref_map()` 就是一次带三个前缀的调用，git 按完整 refname 排序，
+    /// 因此 heads → remotes → tags 的顺序与合并前逐字相同。
+    fn refs(&self) -> Result<Refs> {
         let out = self.run(&[
             "for-each-ref",
-            "--format=%(objectname)\t%(refname:short)",
+            REF_FORMAT,
             "refs/heads/",
             "refs/tags/",
             "refs/remotes/",
         ])?;
-        let mut map: HashMap<String, Vec<String>> = HashMap::new();
-        if let Some(out) = out {
-            for line in out.lines() {
-                let mut parts = line.split('\t');
-                let sha = parts.next().unwrap_or("").to_string();
-                let name = parts.next().unwrap_or("").to_string();
-                if !sha.is_empty() && !name.is_empty() {
-                    map.entry(sha).or_default().push(name);
-                }
-            }
-        }
-        Ok(map)
-    }
 
-    fn head(&self, upstream: Option<UpstreamInfo>) -> Result<HeadInfo> {
-        let symbolic = self.run(&["symbolic-ref", "--quiet", "--short", "HEAD"])?;
-        let (branch, detached) = match symbolic {
-            Some(s) if !s.trim().is_empty() => (Some(s.trim().to_string()), false),
-            _ => (None, true),
+        let mut refs = Refs {
+            branches: Vec::new(),
+            tags: Vec::new(),
+            by_sha: HashMap::new(),
         };
-        let commit = self
-            .run(&["rev-parse", "HEAD"])?
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        Ok(HeadInfo {
-            branch,
-            commit,
-            detached,
-            upstream,
-        })
-    }
 
-    fn branches(&self) -> Result<Vec<BranchInfo>> {
-        let out = self.run(&[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(objectname)\t%(HEAD)",
-            "refs/heads/",
-        ])?;
-        let mut result = Vec::new();
         if let Some(out) = out {
             for line in out.lines() {
                 let mut parts = line.split('\t');
-                let name = parts.next().unwrap_or("").to_string();
-                let commit = parts.next().unwrap_or("").to_string();
-                let is_current = parts.next().unwrap_or("") == "*";
-                if !name.is_empty() {
-                    result.push(BranchInfo {
-                        name,
-                        commit,
-                        is_current,
+                let sha = parts.next().unwrap_or("");
+                let short = parts.next().unwrap_or("");
+                let full = parts.next().unwrap_or("");
+                let head_marker = parts.next().unwrap_or("");
+                if sha.is_empty() || short.is_empty() {
+                    continue;
+                }
+
+                refs.by_sha
+                    .entry(sha.to_string())
+                    .or_default()
+                    .push(short.to_string());
+
+                if full.starts_with("refs/heads/") {
+                    refs.branches.push(BranchInfo {
+                        name: short.to_string(),
+                        commit: sha.to_string(),
+                        is_current: head_marker == "*",
+                    });
+                } else if full.starts_with("refs/tags/") {
+                    refs.tags.push(TagInfo {
+                        name: short.to_string(),
+                        commit: sha.to_string(),
                     });
                 }
             }
         }
-        Ok(result)
-    }
 
-    fn tags(&self) -> Result<Vec<TagInfo>> {
-        let out = self.run(&[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(objectname)",
-            "refs/tags/",
-        ])?;
-        let mut result = Vec::new();
-        if let Some(out) = out {
-            for line in out.lines() {
-                let mut parts = line.split('\t');
-                let name = parts.next().unwrap_or("").to_string();
-                let commit = parts.next().unwrap_or("").to_string();
-                if !name.is_empty() {
-                    result.push(TagInfo { name, commit });
-                }
-            }
-        }
-        Ok(result)
+        Ok(refs)
     }
 
     /// 解析 `git status --porcelain=v2 --branch -z`。
     ///
     /// `-z` 使用 NUL 分隔条目，可安全处理路径中的空格与引号。
     ///
-    /// 输出流由三部分组成：一组 `# branch.*` 头部行（`--branch` 开启后才有）、
-    /// 工作区条目、以及未跟踪条目。每条记录都以 NUL 结尾，头部行也是——
+    /// 输出流由四部分组成：`# branch.*` 头部行（`--branch` 开启后才有）、
+    /// 工作区条目、未跟踪条目，以及被忽略条目。每条记录都以 NUL 结尾，头部行也是——
     /// 因此不需要按换行切分，路径中含换行符也不会破坏解析。
     ///
-    /// **上游计数就藏在头部里**（`# branch.upstream <ref>` / `# branch.ab +N -M`），
-    /// 所以顺带一并返回，避免再起一个 `rev-list --count` 子进程。
-    fn status(&self) -> Result<(StatusInfo, Option<UpstreamInfo>)> {
+    /// **三样东西都藏在这批头部行里**：上游计数（`# branch.upstream` / `# branch.ab`）、
+    /// 分支名（`# branch.head`）、HEAD（`# branch.oid`）。原先后两项各要一次
+    /// `symbolic-ref` / `rev-parse HEAD` 子进程，现在一并从同一次调用里取
+    /// （`ADR/002`：每省一次子进程约省 30ms）。
+    ///
+    /// 头部行缺失时的降级：分支视为 `None`、`detached` 为 `true`、commit 为空串 ——
+    /// 与「`symbolic-ref` 失败 + `rev-parse HEAD` 失败」的旧行为一致。
+    /// 正常仓库不会走到这里，`snapshot_http` 之外另有一条测试钉住头部行的存在。
+    fn status(&self) -> Result<(StatusInfo, Option<UpstreamInfo>, HeadMeta)> {
         let out = self.run(&["status", "--porcelain=v2", "--branch", "-z"])?;
         let mut info = StatusInfo::default();
         let mut upstream_name: Option<String> = None;
         let mut ahead_behind: Option<(u32, u32)> = None;
+        let mut branch_head: Option<String> = None;
+        let mut branch_oid: Option<String> = None;
 
         if let Some(out) = out {
             for entry in out.split('\0') {
@@ -319,6 +358,14 @@ impl Git {
                 }
                 if let Some(rest) = entry.strip_prefix("# branch.ab ") {
                     ahead_behind = parse_ahead_behind(rest);
+                    continue;
+                }
+                if let Some(rest) = entry.strip_prefix("# branch.head ") {
+                    branch_head = Some(rest.trim().to_string());
+                    continue;
+                }
+                if let Some(rest) = entry.strip_prefix("# branch.oid ") {
+                    branch_oid = Some(rest.trim().to_string());
                     continue;
                 }
                 if entry.starts_with("# ") {
@@ -379,7 +426,11 @@ impl Git {
             }
         });
 
-        Ok((info, upstream))
+        // `# branch.head` 在分离头指针时是 `(detached)`，未出生分支上是分支名。
+        // 任何以 `(` 开头的都是占位值，不算分支名。
+        let meta = parse_head_meta(branch_head.as_deref(), branch_oid.as_deref());
+
+        Ok((info, upstream, meta))
     }
 
     fn classify(info: &mut StatusInfo, xy: &str, path: &str) {
@@ -401,6 +452,9 @@ impl Git {
     }
 
     /// 只读执行 Git 命令。返回 `None` 表示命令失败但不致命。
+    ///
+    /// **这里是全项目唯一的子进程出口**（`open()` 那一次除外），
+    /// 因此 spawn 计数在这里累加 —— 见 [`Git::spawns`]。
     fn run(&self, args: &[&str]) -> Result<Option<String>> {
         let out = Command::new("git")
             .arg("-C")
@@ -408,10 +462,35 @@ impl Git {
             .args(args)
             .output()
             .with_context(|| format!("failed to run git {:?}", args))?;
+        self.spawns.fetch_add(1, Ordering::Relaxed);
         if !out.status.success() {
             return Ok(None);
         }
         Ok(Some(String::from_utf8(out.stdout)?))
+    }
+}
+
+/// 从 `status --branch` 的 `# branch.head` / `# branch.oid` 推出分支与 HEAD（`ADR/002`）。
+///
+/// 抽成纯函数是为了让**降级分支可测**：git 正常输出时这两个头部行一定在，
+/// 所以「缺失」这条路径在集成测试里根本构造不出来 —— 只有纯函数能钉住它。
+fn parse_head_meta(branch_head: Option<&str>, branch_oid: Option<&str>) -> HeadMeta {
+    HeadMeta {
+        // `(detached)` / `(unknown)` 这类占位值都不算分支名。
+        branch: branch_head
+            .filter(|name| !name.starts_with('('))
+            .map(str::to_string),
+        // `(initial)` 是空仓库（尚无提交）的占位值，此时 HEAD 视为空串 ——
+        // 与旧实现里 `rev-parse HEAD` 失败后取默认值的表现一致。
+        commit: branch_oid
+            .filter(|oid| !oid.starts_with('('))
+            .unwrap_or("")
+            .to_string(),
+        // 分隔：分支名取不到时按分离头指针处理（保守：不谎称在某个分支上）。
+        detached: match branch_head {
+            Some(name) => name.starts_with('('),
+            None => true,
+        },
     }
 }
 
@@ -520,10 +599,43 @@ fn cap_patch(patch: String) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_patch, parse_ahead_behind, parse_remote, MAX_DIFF_BYTES};
+    use super::{cap_patch, parse_ahead_behind, parse_head_meta, parse_remote, MAX_DIFF_BYTES};
 
     // 注意：本模块位于 core/src 下，会被 read-only guard 扫描，
     // 因此断言里的字面量只使用非「纯小写单词」形式。
+
+    #[test]
+    fn head_meta_reads_porcelain_v2_headers() {
+        let meta = parse_head_meta(Some("main"), Some("abc123"));
+        assert_eq!(meta.branch.as_deref(), Some("main"));
+        assert_eq!(meta.commit, "abc123");
+        assert!(!meta.detached, "有分支名就不是分离头指针");
+    }
+
+    #[test]
+    fn head_meta_rejects_placeholder_values() {
+        // 分离头指针：`# branch.head` 是 `(detached)`，但 oid 是真实的。
+        let detached = parse_head_meta(Some("(detached)"), Some("abc123"));
+        assert_eq!(detached.branch, None, "`(detached)` 不能当分支名透给前端");
+        assert!(detached.detached);
+        assert_eq!(detached.commit, "abc123", "分离头指针仍有 commit");
+
+        // 空仓库（尚无提交）：分支名是真的，oid 是占位值。
+        let initial = parse_head_meta(Some("main"), Some("(initial)"));
+        assert_eq!(initial.branch.as_deref(), Some("main"));
+        assert_eq!(initial.commit, "", "`(initial)` 不能当成 sha");
+        assert!(!initial.detached, "未出生分支仍未分离");
+    }
+
+    /// git 正常输出时不会走到这条路径。它钉住的是「万一 porcelain v2 的头部行改名了」
+    /// 时的降级：宁可退化成「未知的分离头指针」，也不要把占位字符串当数据送出去。
+    #[test]
+    fn head_meta_degrades_to_detached_when_headers_are_missing() {
+        let meta = parse_head_meta(None, None);
+        assert_eq!(meta.branch, None);
+        assert!(meta.detached);
+        assert_eq!(meta.commit, "");
+    }
     #[test]
     fn parses_branch_ab_counts() {
         assert_eq!(parse_ahead_behind("+2 -0"), Some((2, 0)));

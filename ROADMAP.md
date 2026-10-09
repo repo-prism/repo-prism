@@ -53,7 +53,12 @@
 | `005` | [TASK-015](TASKS/015-mcp-extension.md) | MCP 工具扩展（3 → 5） | ✅ |
 | `005` | [TASK-016](TASKS/016-virtual-scroll.md) | 前端虚拟滚动 | ✅ |
 | `006` | — | 发布 v0.2.0（tag `v0.2.0`） | ✅ 2026-10-09 |
-| `005` 预告 | TASK-017–020 | `gix` 后端 / 增量缓存 / 多仓库 / PR 只读视图（v0.3） | ⬜ 未开始 |
+| v0.3 | [TASK-017](TASKS/017-git-read-perf.md) | Git 读取层性能：减 spawn（原定「`gix` 后端」，经 [`ADR-002`](ADR/002-git-backend-evolution.md) 改手段） | ✅ 2026-10-09 |
+| v0.3 | TASK-018–020 | 增量缓存 / 多仓库 / PR 只读视图 | ⬜ 未开始 |
+
+> **TASK-017 的手段变更**是 v0.3 的第一个决策点。血统里它的主题是「`gix` 后端」，
+> `ADR-002` 实测后否决了换后端，改为在同一后端里合并子进程；**目标（大仓库首屏性能）未变**，
+> 卡号未变。详见 `ADR/002` 与 `TASKS/017` 的「与归档规划的一处偏离」。
 
 ### 已知偏差（在 TASK-003 批次前后补做的工程补丁）
 
@@ -77,7 +82,8 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **123 passed**（core 95 / CLI 14 / MCP 14） |
+| Rust 测试 | `cargo test --workspace` | ✅ **127 passed**（core 99 / CLI 14 / MCP 14） |
+| 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7） |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 27 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
@@ -88,10 +94,18 @@
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ 修复后**三次**全绿：`99478ea` → run 37912380547、`278ceb9` → run 37913817616、`039399f`（P-07）→ run 37920164788（6 腿全 success，2m 1s）。修复前（2026-10-07 19:33 起）**当时存在的 5 次运行全部失败** |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
-**core 95 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
-diff 10 / perf 1 / remote 5 / snapshot 16 / **`summarizer_http` 8（P-07 新增）**。
+**core 99 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
+`parse_head_meta` 等）/ analysis 5 / diff 10 / perf 2 / remote 5 / snapshot 16 /
+**`summarizer_http` 8（P-07 新增）**。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
+
+**为什么还要一条「子进程次数」门禁**（`ADR/002`）：实测显示耗时几乎完全由
+「起了几个 `git` 进程」决定 —— 4 万提交仓库上的 `for-each-ref` 与完全不读仓库的
+`git --version` 耗时量级相同；提交数 1 万 → 4 万，`snapshot()` 耗时无系统性变化。
+而**毫秒阈值会随 runner 抖动**（实测同机连跑三次 208/470/576ms），
+**spawn 次数不会**。所以 spawn 次数是比毫秒更硬、且能定位到具体方法的门禁，
+`tests/scale.rs`（`#[ignore]`）保留「改动前」的 argv 序列作为可重测的对照。
 
 **`summarizer_http` 补的是什么**：`summarizer.rs` 那 13 个单测是纯函数，
 而真正把字节送出进程的两处 `ureq` 调用在 P-07 之前**一次都没执行过**（本机无 Ollama）。
@@ -133,11 +147,16 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
 `SPEC`/`SECURITY` 里被声明为「只由测试兜底」，而那条测试**从未运行过那两行代码**。
 现在用回环 stub 把它跑通并钉住出网 body 的内容。
 
-接下来按原规划进 v0.3（`005` 文档的预告）：
+接下来按原规划进 v0.3：
 
-1. **TASK-017 `gix` 后端** —— 目标是大仓库首屏 < 1s；当前走系统 Git 子进程（`ADR/001`），
-   换后端属于重大架构变更，需要先立 ADR-002 说清「为什么值得放弃系统 Git」
-2. **TASK-018 增量缓存** —— 提交图分页与 diff 结果的本地缓存
+1. ~~**TASK-017 `gix` 后端**~~ —— ✅ 2026-10-09，但**手段被 [`ADR-002`](ADR/002-git-backend-evolution.md) 换掉了**：
+   实测发现瓶颈不是仓库规模而是子进程数，且换 `gix` 会让只读扫描器空转。
+   改为在同一后端里合并子进程：`snapshot()` 5 → 2、`snapshot()+commits()` 7 → 4，
+   并把 **spawn 次数**做成机器无关的门禁。`gix` 转为条件触发
+   （触发条件写在 `ADR/002` 第五节：真实大仓库上首屏 > 1s 且瓶颈已不是 spawn）。
+2. **TASK-018 增量缓存** —— 提交图分页与 diff 结果的本地缓存。
+   `ADR/002` 已指出其中一条可量化的收益：把共用的引用映射跨调用缓存下来，
+   可以把 4 次 spawn 再降到 3 次
 3. **TASK-019 多仓库工作区**（US-9）
 4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界
 
