@@ -37,31 +37,38 @@ fn inspect_json_emits_valid_snapshot() {
     let value: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("输出必须是合法 JSON");
 
+    // TASK-008：所有 --json 输出都包在 schema 信封里
+    assert_eq!(value["schema_version"], "1");
+    assert_eq!(value["tool"], "repoprism");
+    assert!(value["tool_version"].is_string());
+
+    let data = &value["data"];
+
     // schema 与 SPEC.md / model.rs 对齐
-    assert_eq!(value["head"]["branch"], "main");
-    assert_eq!(value["head"]["detached"], false);
+    assert_eq!(data["head"]["branch"], "main");
+    assert_eq!(data["head"]["detached"], false);
     assert!(
-        value["head"]["commit"].as_str().unwrap().len() == 40,
+        data["head"]["commit"].as_str().unwrap().len() == 40,
         "head.commit 应为完整 SHA"
     );
-    assert_eq!(value["head"]["upstream"], serde_json::Value::Null);
+    assert_eq!(data["head"]["upstream"], serde_json::Value::Null);
 
-    let branches = value["branches"].as_array().expect("branches 应为数组");
+    let branches = data["branches"].as_array().expect("branches 应为数组");
     assert_eq!(branches.len(), 1);
     assert_eq!(branches[0]["name"], "main");
     assert_eq!(branches[0]["is_current"], true);
 
-    let tags = value["tags"].as_array().expect("tags 应为数组");
+    let tags = data["tags"].as_array().expect("tags 应为数组");
     assert_eq!(tags.len(), 1);
     assert_eq!(tags[0]["name"], "v0.1.0");
 
     // status 三个分组必须存在
-    assert!(value["status"]["conflicts"].is_array());
-    assert!(value["status"]["staged"].is_array());
-    assert!(value["status"]["unstaged"].is_array());
+    assert!(data["status"]["conflicts"].is_array());
+    assert!(data["status"]["staged"].is_array());
+    assert!(data["status"]["unstaged"].is_array());
 
     // path 字段回填仓库根目录
-    let path = value["path"].as_str().expect("path 应为字符串");
+    let path = data["path"].as_str().expect("path 应为字符串");
     assert!(path.contains("repoprism-cli-json"), "path={path}");
 }
 
@@ -82,7 +89,9 @@ fn inspect_json_reflects_working_tree_changes() {
     assert!(out.status.success());
 
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("合法 JSON");
-    let unstaged = value["status"]["unstaged"].as_array().expect("unstaged");
+    let unstaged = value["data"]["status"]["unstaged"]
+        .as_array()
+        .expect("unstaged");
     let paths: Vec<&str> = unstaged
         .iter()
         .map(|f| f["path"].as_str().unwrap_or(""))
