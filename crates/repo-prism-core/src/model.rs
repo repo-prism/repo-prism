@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,6 +140,44 @@ impl From<DiffFile> for FileStat {
             binary: file.binary,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 工作区行数统计
+// ---------------------------------------------------------------------------
+
+/// 单个文件工作区 diff 的行数统计，来自 `git diff --numstat -z`。
+///
+/// **不属于** CLI / MCP 对外契约（对外只出现 `ChangeAnalysis` 的结果），
+/// 因此不参与序列化；定义在这里是为了和 `FileStat` 并排，保持「变更文件量级」
+/// 这一概念的数据类型只有一处。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineStat {
+    pub additions: u32,
+    pub deletions: u32,
+    /// 二进制文件：`--numstat` 的增删列是 `-`，此时两个计数都记 0。
+    pub binary: bool,
+}
+
+/// 以**新路径**为键的工作区行数统计。
+pub type LineStats = HashMap<String, LineStat>;
+
+// ---------------------------------------------------------------------------
+// 外部集成（US-8）
+// ---------------------------------------------------------------------------
+
+/// `origin` remote 的解析结果。
+///
+/// 只做 URL 结构解析，**不访问网络**。前端据此拼出 GitDiagram / GitIngest /
+/// DeepWiki / GitHub.dev 等外部工具的跳转地址。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteInfo {
+    pub host: String,
+    pub owner: String,
+    /// 仓库名。GitLab 这类支持子组的平台可能含 `/`。
+    pub repo: String,
+    /// 原始 URL，原样保留供界面展示。
+    pub url: String,
 }
 
 /// 一次 Diff 的完整结果。

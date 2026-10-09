@@ -1,4 +1,6 @@
-use repo_prism_core::{CommitDetail, CommitInfo, Diff, Git, RepoSnapshot};
+use repo_prism_core::{
+    ChangeAnalysis, CommitDetail, CommitInfo, Diff, Git, RemoteInfo, RepoSnapshot,
+};
 
 #[tauri::command]
 fn inspect_repo(path: String) -> Result<RepoSnapshot, String> {
@@ -42,6 +44,32 @@ fn get_diff(path: String, from: Option<String>, to: Option<String>) -> Result<Di
         .map_err(|e| e.to_string())
 }
 
+/// 未提交改动的本地风险分析（US-7 的本地部分）。
+///
+/// 行数统计单独取一次：`snapshot()` 不带它，而「大量删除」这条规则需要。
+/// 取不到行数时该规则不命中，不会误报。
+#[tauri::command]
+fn analyze_changes(path: String) -> Result<ChangeAnalysis, String> {
+    Git::open(&path)
+        .and_then(|g| {
+            let snapshot = g.snapshot()?;
+            let stats = g.working_tree_stats()?;
+            Ok(ChangeAnalysis::from_status_and_stats(
+                &snapshot.status,
+                &stats,
+            ))
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// `origin` remote 的结构化信息（US-8）。没有 remote 时是 `null`，不是错误。
+#[tauri::command]
+fn get_remote_info(path: String) -> Result<Option<RemoteInfo>, String> {
+    Git::open(&path)
+        .and_then(|g| g.remote_info())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -51,7 +79,9 @@ pub fn run() {
             get_commits,
             get_commit_detail,
             get_commit_diff,
-            get_diff
+            get_diff,
+            analyze_changes,
+            get_remote_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

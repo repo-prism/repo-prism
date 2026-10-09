@@ -20,7 +20,7 @@
 //! 于是分工为：路径与类型来自 `--name-status -z`；hunk 内容来自 patch。
 //! 两者由 Git 按同一顺序生成，因此按**下标**一一对应即可，无需解析 patch 里的路径。
 
-use crate::model::{ChangeKind, DiffFile, DiffHunk, DiffLine, DiffLineKind};
+use crate::model::{ChangeKind, DiffFile, DiffHunk, DiffLine, DiffLineKind, LineStat, LineStats};
 
 /// 单个变更文件的身份信息，来自 `--name-status --find-renames -z`。
 #[derive(Debug, Clone, PartialEq)]
@@ -265,6 +265,72 @@ fn parse_range(text: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// 解析 `git diff --numstat -z` 的输出，得到「路径 → 增删行数」。
+///
+/// 记录格式（NUL 分隔，git 2.x 实测）：
+///
+/// ```text
+/// 2\t1\ta.txt\0          # 普通变更：增行数、删行数、路径
+/// -\t-\tbin.dat\0        # 二进制：两列都是 `-`
+/// 0\t0\t\0old\0new\0     # 重命名 / 复制：路径位为空，随后两个字段是旧、新路径
+/// ```
+///
+/// 二进制文件两个计数记 0 并置 `binary: true`。重命名按**新路径**建键，
+/// 与 `status --porcelain=v2` 报出的路径保持一致。
+///
+/// 与 `--name-status -z` 同理，路径取 `-z` 的原字节输出，不做转义解析。
+pub(crate) fn parse_numstat(raw: &str) -> LineStats {
+    let mut stats = LineStats::new();
+    let fields: Vec<&str> = raw.split('\0').collect();
+    let mut index = 0;
+
+    while index < fields.len() {
+        let record = fields[index];
+        if record.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        let mut parts = record.splitn(3, '\t');
+        let additions = parts.next().unwrap_or("");
+        let deletions = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
+
+        // 路径位为空说明这是重命名 / 复制：旧、新路径各占一个字段
+        let (path, consumed) = if path.is_empty() {
+            let Some(new_path) = fields.get(index + 2) else {
+                break;
+            };
+            (*new_path, 3)
+        } else {
+            (path, 1)
+        };
+
+        if !path.is_empty() {
+            stats.insert(path.to_string(), line_stat(additions, deletions));
+        }
+        index += consumed;
+    }
+
+    stats
+}
+
+/// `--numstat` 的增删列：数字则正常计数，`-` 表示二进制。
+fn line_stat(additions: &str, deletions: &str) -> LineStat {
+    match (additions.parse::<u32>(), deletions.parse::<u32>()) {
+        (Ok(additions), Ok(deletions)) => LineStat {
+            additions,
+            deletions,
+            binary: false,
+        },
+        _ => LineStat {
+            additions: 0,
+            deletions: 0,
+            binary: true,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +446,46 @@ Binary files /dev/null and b/bin.dat differ
         let (files, truncated) = parse_patch(SAMPLE_PATCH, &names, 5);
         assert!(!truncated);
         assert_eq!(files[0].hunks[0].lines.len(), 5);
+    }
+
+    /// NUL 一律写 `\u{0}`：紧跟数字的 `\0` 写成 `\00` 会造成视觉歧义。
+    const SAMPLE_NUMSTAT: &str = "2\t1\ta.txt\u{0}-\t-\tbin.dat\u{0}0\t1\tsp ace.txt\u{0}0\t0\t\u{0}sub/old.txt\u{0}sub/new.txt\u{0}";
+
+    #[test]
+    fn parses_numstat_counts_spaces_and_binary() {
+        let stats = parse_numstat(SAMPLE_NUMSTAT);
+        assert_eq!(stats.len(), 4, "重命名记一条，不重复记新旧两条");
+
+        let a = stats.get("a.txt").copied().expect("a.txt 应有统计");
+        assert_eq!(a.additions, 2);
+        assert_eq!(a.deletions, 1);
+        assert!(!a.binary);
+
+        let bin = stats.get("bin.dat").copied().expect("bin.dat 应有统计");
+        assert!(bin.binary, "`-` 两列必须判为二进制");
+        assert_eq!(bin.additions, 0);
+        assert_eq!(bin.deletions, 0);
+
+        assert!(stats.contains_key("sp ace.txt"), "含空格的路径不应被转义");
+    }
+
+    #[test]
+    fn numstat_keys_renames_by_new_path() {
+        let stats = parse_numstat(SAMPLE_NUMSTAT);
+        assert!(stats.contains_key("sub/new.txt"), "重命名按新路径建键");
+        assert!(
+            !stats.contains_key("sub/old.txt"),
+            "旧路径不应残留，否则前端按新路径取不到统计"
+        );
+        assert_eq!(
+            stats.get("sub/new.txt").copied().unwrap().additions,
+            0,
+            "纯重命名增删皆为 0"
+        );
+    }
+
+    #[test]
+    fn numstat_tolerates_empty_input() {
+        assert!(parse_numstat("").is_empty());
     }
 }

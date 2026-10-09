@@ -1,4 +1,4 @@
-use crate::diffparse::{parse_name_status, parse_patch};
+use crate::diffparse::{parse_name_status, parse_numstat, parse_patch};
 use crate::model::*;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -157,6 +157,40 @@ impl Git {
         patch.extend_from_slice(&locate);
 
         self.collect_diff(&names, &patch)
+    }
+
+    /// 解析 `origin` remote 为结构化的 host / owner / repo（US-8）。
+    ///
+    /// 只读，且**不访问网络** —— 只是把仓库配置里的 URL 字符串拆开。
+    /// 没有配置 `origin`（或命令失败）时返回 `None`：让调用方去提示用户，
+    /// 而不是把一个「没有远端」硬报成错误。
+    pub fn remote_info(&self) -> Result<Option<RemoteInfo>> {
+        let Some(url) = self.run(&["remote", "get-url", "origin"])? else {
+            return Ok(None);
+        };
+        Ok(parse_remote(url.trim()))
+    }
+
+    /// 工作区（含已暂存）的逐文件行数统计。
+    ///
+    /// 纯 `status --porcelain=v2` **拿不到**增删行数，而「大量删除」这类风险规则
+    /// 需要它。这里的两次 `--numstat` 调用是唯一额外的子进程开销，
+    /// 且只被 `analyze_changes` 使用 —— `snapshot()` 不受影响。
+    ///
+    /// `--no-textconv` 与 `commit_patch_args` 同理：不得触发仓库自定义的转换器。
+    /// `--numstat` 只数行数、不产出正文，因此比读 patch 廉价得多。
+    ///
+    /// 两次调用分别对应「索引 vs HEAD」与「工作区 vs 索引」；同一路径若两处都有，
+    /// 后写的（工作区）覆盖前写的 —— 用户更关心还没暂存的那一份。
+    pub fn working_tree_stats(&self) -> Result<LineStats> {
+        let mut stats = LineStats::new();
+        if let Some(raw) = self.run(&["diff", "--cached", "--numstat", "-z", "--no-textconv"])? {
+            stats.extend(parse_numstat(&raw));
+        }
+        if let Some(raw) = self.run(&["diff", "--numstat", "-z", "--no-textconv"])? {
+            stats.extend(parse_numstat(&raw));
+        }
+        Ok(stats)
     }
 
     /// 两次调用读同一个 diff：`--name-status -z` 给可靠的路径与类型，
@@ -381,6 +415,53 @@ impl Git {
     }
 }
 
+/// 把 remote URL 解析成 `host / owner / repo`。
+///
+/// 支持四种写法：
+///
+/// ```text
+/// git@github.com:owner/repo.git            # SSH 简写（host 与 path 之间是 :）
+/// ssh://git@github.com/owner/repo.git      # SSH 显式协议
+/// https://github.com/owner/repo.git        # HTTPS
+/// https://user@github.com/owner/repo.git   # HTTPS 带用户名
+/// ```
+///
+/// 其余形式（本地路径、`file://`、bundles）一律返回 `None`：
+/// **不猜**。猜错会让前端把用户带到别的仓库去。
+fn parse_remote(url: &str) -> Option<RemoteInfo> {
+    // SSH 简写的分隔符与 URL 形式不同，单独处理
+    if let Some(rest) = url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        return build_remote(url, host, path);
+    }
+
+    let rest = url
+        .strip_prefix("ssh://")
+        .or_else(|| url.strip_prefix("https://"))
+        .or_else(|| url.strip_prefix("http://"))?;
+
+    // 去掉可选的 `user@` / `user:pass@`
+    let rest = rest.rsplit('@').next().unwrap_or(rest);
+    let (host, path) = rest.split_once('/')?;
+    build_remote(url, host, path)
+}
+
+fn build_remote(url: &str, host: &str, path: &str) -> Option<RemoteInfo> {
+    // 先削尾斜杠再削 `.git`：`owner/repo.git/` 这种也削得干净
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    // `split_once` 而非 `rsplit`：GitLab 子组（owner/sub/repo）拼出的 URL 仍然正确
+    let (owner, repo) = path.split_once('/')?;
+    if host.is_empty() || owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(RemoteInfo {
+        host: host.to_string(),
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        url: url.to_string(),
+    })
+}
+
 /// 解析 `# branch.ab` 的值，形如 `+2 -0`。
 ///
 /// `+` 是领先上游的提交数，`-` 是落后上游的提交数。格式不符时返回 `None`，
@@ -439,7 +520,7 @@ fn cap_patch(patch: String) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_patch, parse_ahead_behind, MAX_DIFF_BYTES};
+    use super::{cap_patch, parse_ahead_behind, parse_remote, MAX_DIFF_BYTES};
 
     // 注意：本模块位于 core/src 下，会被 read-only guard 扫描，
     // 因此断言里的字面量只使用非「纯小写单词」形式。
@@ -486,5 +567,75 @@ mod tests {
             out.chars().all(|c| c == '中'),
             "截断必须落在字符边界上，否则会 panic"
         );
+    }
+
+    #[test]
+    fn parses_ssh_shorthand_remote() {
+        let info = parse_remote("git@github.com:owner/repo.git").expect("SSH 简写应能解析");
+        assert_eq!(info.host, "github.com");
+        assert_eq!(info.owner, "owner");
+        assert_eq!(info.repo, "repo", ".git 后缀必须削掉");
+        assert_eq!(
+            info.url, "git@github.com:owner/repo.git",
+            "原始 URL 原样保留"
+        );
+    }
+
+    #[test]
+    fn parses_https_remote_with_and_without_user() {
+        let plain = parse_remote("https://github.com/owner/repo.git").expect("HTTPS 应能解析");
+        assert_eq!(
+            (
+                plain.host.as_str(),
+                plain.owner.as_str(),
+                plain.repo.as_str()
+            ),
+            ("github.com", "owner", "repo")
+        );
+
+        // 带口令与不带后缀两种写法都要能吃下
+        let with_user =
+            parse_remote("https://user@gitlab.com/group/repo").expect("带用户名的 HTTPS 应能解析");
+        assert_eq!(with_user.host, "gitlab.com");
+        assert_eq!(with_user.owner, "group");
+        assert_eq!(with_user.repo, "repo");
+    }
+
+    #[test]
+    fn parses_explicit_ssh_protocol_remote() {
+        let info = parse_remote("ssh://git@github.com/owner/repo.git").expect("ssh:// 应能解析");
+        assert_eq!(info.host, "github.com");
+        assert_eq!(info.owner, "owner");
+        assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
+    fn trailing_slash_is_trimmed() {
+        let info = parse_remote("https://github.com/owner/repo.git/").expect("尾斜杠应能容错");
+        assert_eq!(info.repo, "repo", "先削斜杠再削 .git，两种尾巴才都削得干净");
+    }
+
+    #[test]
+    fn subgroup_path_keeps_the_whole_name() {
+        // GitLab 子组：owner 取第一段，其余留给 repo，拼出的 URL 仍然正确
+        let info = parse_remote("https://gitlab.com/group/sub/repo.git").expect("子组路径应能解析");
+        assert_eq!(info.owner, "group");
+        assert_eq!(info.repo, "sub/repo");
+    }
+
+    #[test]
+    fn rejects_urls_that_are_not_remotes() {
+        // 本地路径、file:// 与残缺 URL 一律返回 None —— 不猜，猜错会把用户带到别的仓库
+        assert!(parse_remote("/tmp/some/repo").is_none());
+        assert!(parse_remote("file:///tmp/some/repo").is_none());
+        assert!(
+            parse_remote("https://github.com").is_none(),
+            "没有 owner/repo"
+        );
+        assert!(
+            parse_remote("git@github.com:repo.git").is_none(),
+            "没有 owner"
+        );
+        assert!(parse_remote("").is_none());
     }
 }

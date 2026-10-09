@@ -141,3 +141,51 @@ export async function getCommitDiff(path: string, sha: string): Promise<Diff> {
 export async function getDiff(path: string, from?: string, to?: string): Promise<Diff> {
   return invoke<Diff>("get_diff", { path, from: from ?? null, to: to ?? null });
 }
+
+// ---------------------------------------------------------------------------
+// 变更分析与风险标记（US-7 的本地部分）
+// ---------------------------------------------------------------------------
+
+export type RiskLevel = "info" | "warn" | "critical";
+
+export interface Risk {
+  rule_id: string;
+  level: RiskLevel;
+  message: string;
+  path: string;
+}
+
+export interface RiskCounts {
+  info: number;
+  warn: number;
+  critical: number;
+}
+
+export interface ChangeAnalysis {
+  summary: string;
+  total_files: number;
+  risks: Risk[];
+  by_level: RiskCounts;
+}
+
+/** 未提交改动的本地风险分析。纯本地，不调用任何外部 API。 */
+export async function analyzeChanges(path: string): Promise<ChangeAnalysis> {
+  return invoke<ChangeAnalysis>("analyze_changes", { path });
+}
+
+// ---------------------------------------------------------------------------
+// 外部工具跳转（US-8）
+// ---------------------------------------------------------------------------
+
+export interface RemoteInfo {
+  host: string;
+  owner: string;
+  /** 仓库名。GitLab 这类支持子组的平台可能含 `/`。 */
+  repo: string;
+  url: string;
+}
+
+/** 没有配置 `origin` 时返回 `null`，不抛错。 */
+export async function getRemoteInfo(path: string): Promise<RemoteInfo | null> {
+  return invoke<RemoteInfo | null>("get_remote_info", { path });
+}
