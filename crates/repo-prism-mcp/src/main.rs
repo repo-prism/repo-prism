@@ -7,7 +7,7 @@
 //! （AGENTS.md 的目录职责表）。因此只读约束与 GUI / CLI 共用同一套实现。
 
 use anyhow::Result;
-use repo_prism_core::Git;
+use repo_prism_core::{ChangeAnalysis, Git, LineStats};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -133,6 +133,28 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["path", "sha"]
             }
+        },
+        {
+            "name": "repoprism_analyze",
+            "description": "Analyze a repository's uncommitted changes with a local rule engine. Returns risk findings grouped by severity plus a one-line summary. Fully local: no network calls, no model calls.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to a local Git repository" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "repoprism_remote",
+            "description": "Read a repository's origin remote as structured host / owner / repo / url. Returns null when the repository has no origin remote.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to a local Git repository" }
+                },
+                "required": ["path"]
+            }
         }
     ])
 }
@@ -163,6 +185,24 @@ fn call_tool(params: &Value) -> Result<Value, RpcError> {
             let path = arg_str(&args, "path")?;
             let sha = arg_str(&args, "sha")?;
             to_json_text(open(&path)?.commit_detail(&sha).map_err(tool_failure)?)?
+        }
+        "repoprism_analyze" => {
+            let path = arg_str(&args, "path")?;
+            let git = open(&path)?;
+            let snapshot = git.snapshot().map_err(tool_failure)?;
+            // 行数统计取不到就退化为纯路径规则，而不是让整个工具失败 ——
+            // 「大量删除」这条规则少命中一次，比工具直接报错可接受得多。
+            let stats = git
+                .working_tree_stats()
+                .unwrap_or_else(|_| LineStats::new());
+            to_json_text(ChangeAnalysis::from_status_and_stats(
+                &snapshot.status,
+                &stats,
+            ))?
+        }
+        "repoprism_remote" => {
+            let path = arg_str(&args, "path")?;
+            to_json_text(open(&path)?.remote_info().map_err(tool_failure)?)?
         }
         other => return Err(RpcError::method_not_found(other)),
     };

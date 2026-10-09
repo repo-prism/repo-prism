@@ -41,11 +41,18 @@ cargo build -p repo-prism-mcp --release
 
 ## 可用工具
 
-- `repoprism_inspect(path)` → 仓库快照（HEAD、分支、标签、变更分组）
-- `repoprism_commits(path, limit, skip)` → 提交历史（`limit` 上限 2000）
-- `repoprism_detail(path, sha)` → 提交详情与原始 diff
+| 工具 | 说明 |
+|------|------|
+| `repoprism_inspect(path)` | 仓库快照（HEAD、分支、标签、变更分组） |
+| `repoprism_commits(path, limit, skip)` | 提交历史（`limit` 上限 2000） |
+| `repoprism_detail(path, sha)` | 提交详情与原始 diff |
+| `repoprism_analyze(path)` | 未提交改动的本地风险分析（纯本地规则，不调模型、不联网） |
+| `repoprism_remote(path)` | `origin` 的结构化 host / owner / repo / url；无 remote 时为 `null` |
 
 `tools/call` 的返回值放在 `content[0].text` 里，是一个 JSON 值。
+
+`repoprism_analyze` 返回的 `risks[]` 每条含 `rule_id` / `level` / `message` / `path`，
+`by_level` 是三个等级的计数 —— Agent 可据此决定先看哪个文件。
 
 ## 协议
 

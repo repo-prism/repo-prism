@@ -2,6 +2,9 @@
 
 **状态**：已完成（2026-10-09）
 
+> **后续变更**：工具集已由 [TASK-015](015-mcp-extension.md) 从 3 个扩展到 5 个
+> （新增 `repoprism_analyze` / `repoprism_remote`）。本卡记录的是当时的形态。
+
 ## 目标
 
 实现 stdio 传输的 MCP Server，暴露三个只读工具。

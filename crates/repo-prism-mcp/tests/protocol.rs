@@ -148,7 +148,7 @@ fn initialize_reports_protocol_and_capabilities() {
 }
 
 #[test]
-fn tools_list_exposes_exactly_three_readonly_tools() {
+fn tools_list_exposes_exactly_five_readonly_tools() {
     let responses = serve(&format!(
         "{}\n",
         request(1, "tools/list", serde_json::json!({}))
@@ -160,7 +160,14 @@ fn tools_list_exposes_exactly_three_readonly_tools() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(
         names,
-        vec!["repoprism_inspect", "repoprism_commits", "repoprism_detail"]
+        vec![
+            "repoprism_inspect",
+            "repoprism_commits",
+            "repoprism_detail",
+            "repoprism_analyze",
+            "repoprism_remote",
+        ],
+        "工具集变化必须是有意的：多一个工具就是多一处 Agent 能触发的只读面"
     );
 
     // 每个工具都必须声明 inputSchema 与 path 参数（客户端据此校验调用）
@@ -248,6 +255,109 @@ fn detail_tool_returns_raw_patch() {
         data["patch"]
     );
     assert_eq!(data["truncated"], false);
+}
+
+#[test]
+fn analyze_tool_reports_local_risks() {
+    let repo = TempRepo::new("analyze");
+    repo.write("keep.rs", "fn keep() {}\n");
+    repo.commit("baseline");
+    // 已暂存的疑似密钥 —— 应命中 critical 级规则
+    repo.write(".env", "TOKEN=1\n");
+    repo.git(&["add", ".env"]);
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_analyze",
+            serde_json::json!({ "path": repo.path_str() })
+        )
+    ));
+
+    assert_eq!(responses[0]["result"]["isError"], false);
+    let data = content_json(&responses[0]);
+    assert_eq!(data["total_files"], 1);
+    assert_eq!(data["by_level"]["critical"], 1);
+
+    let risks = data["risks"].as_array().expect("risks 应为数组");
+    assert_eq!(risks.len(), 1);
+    assert_eq!(risks[0]["path"], ".env");
+    assert_eq!(risks[0]["rule_id"], "env-or-secret");
+    assert!(
+        data["summary"].as_str().is_some_and(|s| !s.is_empty()),
+        "分析必须带一句话摘要，Agent 不该自己拼"
+    );
+}
+
+#[test]
+fn analyze_tool_is_clean_on_an_untouched_repository() {
+    let repo = TempRepo::new("analyze-clean");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_analyze",
+            serde_json::json!({ "path": repo.path_str() })
+        )
+    ));
+
+    let data = content_json(&responses[0]);
+    assert_eq!(data["total_files"], 0);
+    assert_eq!(data["risks"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn remote_tool_returns_null_without_an_origin() {
+    let repo = TempRepo::new("remote-none");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_remote",
+            serde_json::json!({ "path": repo.path_str() })
+        )
+    ));
+
+    assert_eq!(responses[0]["result"]["isError"], false);
+    assert_eq!(
+        content_json(&responses[0]),
+        serde_json::Value::Null,
+        "没有 origin 是正常状态，不是错误"
+    );
+}
+
+#[test]
+fn remote_tool_parses_a_github_url() {
+    let repo = TempRepo::new("remote-github");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+    repo.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:repo-prism/repo-prism.git",
+    ]);
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_remote",
+            serde_json::json!({ "path": repo.path_str() })
+        )
+    ));
+
+    let data = content_json(&responses[0]);
+    assert_eq!(data["host"], "github.com");
+    assert_eq!(data["owner"], "repo-prism");
+    assert_eq!(data["repo"], "repo-prism");
 }
 
 #[test]
