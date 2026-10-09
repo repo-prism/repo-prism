@@ -13,6 +13,9 @@ const COMMIT_FORMAT: &str =
 /// 单次 Diff 解析的行数上限。超出即截断并**显式标注**，不静默丢弃。
 const MAX_DIFF_LINES: usize = 5_000;
 
+/// 单次提交原始 diff 文本的上限（2 MiB）。超出即截断并**显式标注**。
+const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
+
 /// Git 只读读取器。
 ///
 /// **安全约束**：只允许白名单内的只读命令。
@@ -110,45 +113,30 @@ impl Git {
         commits
     }
 
-    /// 提交详情：元信息 + 变更文件清单（US-3）。
+    /// 提交详情：元信息 + 变更文件清单 + 原始 diff 正文（US-3）。
+    ///
+    /// 只跑两次 `git show`：`--name-status -z` 给可靠的路径与类型，
+    /// patch 正文既喂结构化解析、也原样交给 `patch` 字段。
     pub fn commit_detail(&self, sha: &str) -> Result<CommitDetail> {
-        let commit = self.commit(sha)?;
-        let diff = self.commit_diff(sha)?;
-        let files = diff
-            .files
-            .into_iter()
-            .map(|file| FileStat {
-                path: file.path,
-                old_path: file.old_path,
-                kind: file.kind,
-                additions: file.additions,
-                deletions: file.deletions,
-                binary: file.binary,
-            })
-            .collect();
-        Ok(CommitDetail { commit, files })
+        let info = self.commit(sha)?;
+        let names_raw = self.run(&commit_names_args(sha))?.unwrap_or_default();
+        let raw = self.run(&commit_patch_args(sha))?.unwrap_or_default();
+
+        let names = parse_name_status(&names_raw);
+        let (files, line_truncated) = parse_patch(&raw, &names, MAX_DIFF_LINES);
+        let (patch, byte_truncated) = cap_patch(raw);
+
+        Ok(CommitDetail {
+            info,
+            files: files.into_iter().map(FileStat::from).collect(),
+            patch,
+            truncated: byte_truncated || line_truncated,
+        })
     }
 
     /// 单个提交的 Diff（US-3）。
     pub fn commit_diff(&self, sha: &str) -> Result<Diff> {
-        // `--format=` 清空提交信息头，只留 diff 正文。
-        let names = [
-            "show",
-            "--format=",
-            "--name-status",
-            "--find-renames",
-            "-z",
-            sha,
-        ];
-        let patch = [
-            "show",
-            "--format=",
-            "--find-renames",
-            "--no-textconv",
-            "--unified=3",
-            sha,
-        ];
-        self.collect_diff(&names, &patch)
+        self.collect_diff(&commit_names_args(sha), &commit_patch_args(sha))
     }
 
     /// 任意两点之间的 Diff。
@@ -404,9 +392,54 @@ fn parse_ahead_behind(s: &str) -> Option<(u32, u32)> {
     Some((ahead, behind))
 }
 
+/// `git show` 的 `--name-status -z` 参数：给出可靠的路径与变更类型。
+///
+/// 路径**只**取自这里。patch 头部的路径不可信：含空格的路径会被追加制表符，
+/// 非 ASCII 路径会被 `core.quotePath` 转义。
+fn commit_names_args(sha: &str) -> [&str; 6] {
+    [
+        "show",
+        "--format=",
+        "--name-status",
+        "--find-renames",
+        "-z",
+        sha,
+    ]
+}
+
+/// `git show` 的 patch 参数。
+///
+/// `--no-textconv` 是**安全要求**而非性能优化：不加它，Git 会对声明了 textconv
+/// 的文件执行仓库自定义的转换器（SECURITY.md 威胁 1）。
+fn commit_patch_args(sha: &str) -> [&str; 6] {
+    [
+        "show",
+        "--format=",
+        "--find-renames",
+        "--no-textconv",
+        "--unified=3",
+        sha,
+    ]
+}
+
+/// 截断原始 patch 文本：超过 [`MAX_DIFF_BYTES`] 时在**字符边界**上截断并标记。
+///
+/// 按字节截断必须回退到 `char_boundary`，否则会在多字节字符中间切开，
+/// 后续的 `String` 构造会 panic。
+fn cap_patch(patch: String) -> (String, bool) {
+    if patch.len() <= MAX_DIFF_BYTES {
+        return (patch, false);
+    }
+    let mut end = MAX_DIFF_BYTES;
+    while end > 0 && !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    (patch[..end].to_string(), true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_ahead_behind;
+    use super::{cap_patch, parse_ahead_behind, MAX_DIFF_BYTES};
 
     // 注意：本模块位于 core/src 下，会被 read-only guard 扫描，
     // 因此断言里的字面量只使用非「纯小写单词」形式。
@@ -422,5 +455,36 @@ mod tests {
         assert_eq!(parse_ahead_behind(""), None);
         assert_eq!(parse_ahead_behind("2 0"), None);
         assert_eq!(parse_ahead_behind("+2"), None);
+    }
+
+    #[test]
+    fn cap_patch_passes_through_small_text() {
+        let small = "diff --git a/a.txt b/a.txt\n".to_string();
+        let (out, truncated) = cap_patch(small.clone());
+        assert_eq!(out, small);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn cap_patch_truncates_at_the_byte_limit() {
+        // 注意：字面量不能写成「单个小写字母」那种纯小写词，否则会被只读扫描器
+        // 当成 Git 子命令 token 报违规 —— 见本模块顶部说明。
+        let big = "x\n".repeat(MAX_DIFF_BYTES / 2 + 10);
+        let (out, truncated) = cap_patch(big);
+        assert!(truncated, "超出上限必须显式标记");
+        assert_eq!(out.len(), MAX_DIFF_BYTES);
+    }
+
+    #[test]
+    fn cap_patch_never_splits_a_multibyte_char() {
+        // 2 MiB 不是 3 的倍数，边界必然落在一个汉字中间
+        let big = "中".repeat(MAX_DIFF_BYTES / 3 + 2);
+        let (out, truncated) = cap_patch(big);
+        assert!(truncated);
+        assert!(out.len() <= MAX_DIFF_BYTES);
+        assert!(
+            out.chars().all(|c| c == '中'),
+            "截断必须落在字符边界上，否则会 panic"
+        );
     }
 }

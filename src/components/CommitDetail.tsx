@@ -1,5 +1,5 @@
 import type { CommitDetail as CommitDetailData, Diff } from "../lib/api";
-import { formatRelativeDate } from "../lib/format";
+import { formatBytes, formatRelativeDate } from "../lib/format";
 import { kindLabel, kindText } from "../lib/kinds";
 import { DiffView } from "./DiffView";
 
@@ -33,7 +33,7 @@ export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCo
     );
   }
 
-  const { commit, files } = detail;
+  const { info, files, patch, truncated } = detail;
   const totalAdd = files.reduce((sum, f) => sum + f.additions, 0);
   const totalDel = files.reduce((sum, f) => sum + f.deletions, 0);
 
@@ -41,26 +41,26 @@ export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCo
     <section className="commit-detail">
       <div className="detail-header">
         <div className="detail-title">
-          <h2>{commit.subject || "(无提交信息)"}</h2>
+          <h2>{info.subject || "(无提交信息)"}</h2>
           <button type="button" className="ghost" onClick={onClose}>
             关闭
           </button>
         </div>
 
         <div className="detail-meta">
-          <code title={commit.sha}>{commit.short_sha}</code>
-          <span>{commit.author_name}</span>
-          <span title={commit.author_date}>{formatRelativeDate(commit.author_date)}</span>
+          <code title={info.sha}>{info.short_sha}</code>
+          <span>{info.author_name}</span>
+          <span title={info.author_date}>{formatRelativeDate(info.author_date)}</span>
         </div>
 
-        {commit.body && <pre className="detail-body">{commit.body}</pre>}
+        {info.body && <pre className="detail-body">{info.body}</pre>}
 
         <div className="detail-parents">
           <span className="muted">父提交</span>
-          {commit.parents.length === 0 ? (
+          {info.parents.length === 0 ? (
             <span className="muted">无（根提交）</span>
           ) : (
-            commit.parents.map((parent) => (
+            info.parents.map((parent) => (
               <button
                 type="button"
                 key={parent}
@@ -79,7 +79,7 @@ export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCo
         <div className="panel-header">
           <h3>变更文件</h3>
           <span className="muted">
-            {files.length} 个 · +{totalAdd} −{totalDel}
+            {files.length} 个 · +{totalAdd} −{totalDel} · 原始 diff {formatBytes(patch.length)}
           </span>
         </div>
         {files.length === 0 ? (
@@ -104,7 +104,11 @@ export function CommitDetail({ detail, diff, loading, error, onClose, onSelectCo
         )}
       </div>
 
-      {diff ? <DiffView diff={diff} /> : <div className="empty">读取 diff…</div>}
+      {diff ? (
+        <DiffView diff={diff} byteTruncated={truncated} />
+      ) : (
+        <div className="empty">读取 diff…</div>
+      )}
     </section>
   );
 }

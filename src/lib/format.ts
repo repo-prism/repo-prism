@@ -10,3 +10,10 @@ export function formatRelativeDate(iso: string): string {
   if (elapsed < 7 * day) return `${Math.floor(elapsed / day)} 天前`;
   return date.toLocaleDateString("zh-CN");
 }
+
+/** 字节数显示，用于「原始 diff 有多大」这类提示。 */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}

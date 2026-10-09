@@ -13,6 +13,8 @@ type Layout = "unified" | "split";
 
 interface Props {
   diff: Diff;
+  /** 原始 patch 文本超过 2 MiB 上限而被截断（与结构化解析上限是两道独立的闸）。 */
+  byteTruncated?: boolean;
 }
 
 /**
@@ -22,12 +24,15 @@ interface Props {
  * 不使用 `dangerouslySetInnerHTML`，也不执行任何来自仓库的内容
  * ——见 SECURITY.md 威胁 3。
  */
-export function DiffView({ diff }: Props) {
+export function DiffView({ diff, byteTruncated = false }: Props) {
   const [layout, setLayout] = useState<Layout>("unified");
 
   if (diff.files.length === 0) {
-    return <div className="empty">无文件变更</div>;
+    // 合并提交的 `git show` 正文本就为空，与「空提交」无法区分，故合并成一句提示。
+    return <div className="empty">合并提交或空 diff，无直接变更内容</div>;
   }
+
+  const truncated = diff.truncated || byteTruncated;
 
   return (
     <div className="diff-view">
@@ -55,7 +60,11 @@ export function DiffView({ diff }: Props) {
         </div>
       </div>
 
-      {diff.truncated && <div className="diff-notice">Diff 超出单次解析上限，后续内容已截断</div>}
+      {truncated && (
+        <div className="diff-notice">
+          Diff 超出单次上限（原始文本 2 MiB / 解析 5000 行），后续内容已截断
+        </div>
+      )}
 
       {diff.files.map((file) => (
         <DiffFileBlock key={file.path} file={file} layout={layout} />

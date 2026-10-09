@@ -100,11 +100,19 @@ pub struct CommitInfo {
 // 提交详情与 Diff（US-3）
 // ---------------------------------------------------------------------------
 
-/// 单个提交的详情：提交元信息 + 变更文件清单。
+/// 单个提交的详情：提交元信息 + 变更文件清单 + 原始 diff 正文。
+///
+/// `patch` 是**未加工的 unified diff 文本**，供 CLI / MCP / Agent 直接消费；
+/// 结构化的 `files` 供前端渲染（见 `Git::commit_diff`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitDetail {
-    pub commit: CommitInfo,
+    pub info: CommitInfo,
     pub files: Vec<FileStat>,
+    /// 原始 unified diff 正文（不含提交信息头）。
+    pub patch: String,
+    /// 是否因超出上限被截断（原始文本 2 MiB / 结构化 5000 行）。
+    /// 截断永远是**显式**的，不静默丢弃。
+    pub truncated: bool,
 }
 
 /// 变更文件的一行摘要。行数取自 diff 的 `+` / `-` 行计数。
@@ -118,6 +126,19 @@ pub struct FileStat {
     pub deletions: u32,
     /// 二进制文件。**不读取其内容**，只标记（SECURITY.md 威胁 2）。
     pub binary: bool,
+}
+
+impl From<DiffFile> for FileStat {
+    fn from(file: DiffFile) -> Self {
+        Self {
+            path: file.path,
+            old_path: file.old_path,
+            kind: file.kind,
+            additions: file.additions,
+            deletions: file.deletions,
+            binary: file.binary,
+        }
+    }
 }
 
 /// 一次 Diff 的完整结果。

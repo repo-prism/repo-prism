@@ -36,7 +36,23 @@ fn commit_detail_lists_all_four_change_kinds() {
     let git = Git::open(repo.path()).expect("open repo");
     let detail = git.commit_detail(&repo.head_sha()).expect("commit detail");
 
-    assert_eq!(detail.commit.subject, "c2");
+    assert_eq!(detail.info.subject, "c2");
+
+    // 契约：`patch` 是**未加工**的 unified diff 正文，供 CLI / MCP / Agent 直接消费
+    assert!(
+        detail.patch.contains("diff --git a/added.txt b/added.txt"),
+        "patch 应含原始 diff 头，实际前 200 字节：{:?}",
+        &detail.patch[..detail.patch.len().min(200)]
+    );
+    assert!(
+        detail.patch.contains("@@"),
+        "patch 应含 hunk 头，说明不是 name-status 摘要"
+    );
+    assert!(
+        !detail.patch.contains("commit c2"),
+        "patch 不应含提交信息头（--format= 已清空）"
+    );
+    assert!(!detail.truncated, "小提交不应被标记截断");
 
     let find = |path: &str| {
         detail

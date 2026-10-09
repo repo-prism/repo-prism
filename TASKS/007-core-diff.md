@@ -10,15 +10,37 @@
 2. `src-tauri` 暴露 `get_commit_detail` / `get_commit_diff` / `get_diff`
 3. 前端 Diff 视图：并排 / 统一两种布局，含 Git 原始行号
 
+## 契约（原规划 TASK-007）
+
+`CommitDetail` 按原规划为 `{ info, files, patch, truncated }`：
+
+- `info`：提交元信息（`CommitInfo`）
+- `files`：变更文件清单（`FileStat`，比原规划的 `{path, additions, deletions}` 多出
+  `old_path` / `kind` / `binary`，属**只增不减**的扩展）
+- `patch`：原始 unified diff 正文，供 CLI / MCP / Agent 直接消费
+- `truncated`：是否被截断（原始文本 2 MiB / 结构化 5000 行）
+
+字段名 `info` 与 `patch` 是对外契约，CLI 的 `detail --json` 与 MCP 的
+`repoprism_detail` 都按它输出，见 `skill/SKILL.md`。
+
 ## 实现
 
 ### core
 
 | 文件 | 内容 |
 |------|------|
-| `src/model.rs` | `CommitDetail` / `FileStat` / `Diff` / `DiffFile` / `DiffHunk` / `DiffLine` / `DiffLineKind`；`ChangeKind::from_status_code` |
+| `src/model.rs` | `CommitDetail` / `FileStat` / `Diff` / `DiffFile` / `DiffHunk` / `DiffLine` / `DiffLineKind`；`ChangeKind::from_status_code`；`From<DiffFile> for FileStat` |
 | `src/diffparse.rs`（新增） | `parse_name_status`（解析 `--name-status -z`）+ `parse_patch`（解析 hunk），**不做任何 Git 调用**，可脱离仓库单测 |
-| `src/git.rs` | `commit()` / `commit_detail()` / `commit_diff()` / `diff(from, to)`；`COMMIT_FORMAT` 与 `MAX_DIFF_LINES` 常量化；`commits()` 与 `commit()` 共用 `parse_commits` |
+| `src/git.rs` | `commit()` / `commit_detail()` / `commit_diff()` / `diff(from, to)`；`COMMIT_FORMAT`、`MAX_DIFF_LINES`、`MAX_DIFF_BYTES` 常量化；`commit_names_args` / `commit_patch_args` 收敛 `git show` 参数；`cap_patch` 按字符边界截断；`commits()` 与 `commit()` 共用 `parse_commits` |
+
+### 一次读取，两种用途
+
+`commit_detail()` 只跑两次 `git show`（`--name-status -z` + patch），
+同一份 patch 正文既喂结构化解析（`files`），也原样进 `patch` 字段。
+
+按字节截断**必须回退到 `char_boundary`**：2 MiB 不是 3 的倍数，直接切会在汉字
+中间断开，后续 `String` 构造会 panic。`cap_patch_never_splits_a_multibyte_char`
+就是为这条写的。
 
 ### 关键设计：路径取自 `-z` 输出，而非 patch 头部
 
@@ -58,11 +80,11 @@ diff --git a/old.txt b/new name.txt
 - [x] 绝不调用 `git lfs`；二进制文件只标记 `binary: true` 与增删计数，**不读取内容**（威胁 2）
 - [x] diff 内容一律文本节点渲染，**无 `dangerouslySetInnerHTML`**（威胁 3）
 - [x] 只用不触发 hook 的只读命令（威胁 4）
-- [x] 单次解析上限 5000 行，超出**显式**标记 `truncated`（威胁 6）
+- [x] 单次解析上限 5000 行 + 原始文本上限 2 MiB，超出**显式**标记 `truncated`（威胁 6）
 
 ## 验收标准
 
-- [x] `commit_detail(sha)` 返回变更文件列表（含 `ChangeKind` 与增删行数）、作者、日期、父提交、提交信息
+- [x] `commit_detail(sha)` 返回 `info` + `files`（含 `ChangeKind` 与增删行数）+ `patch` + `truncated`
 - [x] Diff 返回统一 hunk 结构：文件 → hunk → 行（行号 old/new、类型 context/add/del）
 - [x] 单提交 Diff 性能：perf 门禁中的 `snapshot` / `commits` 均已达标；
       diff 为新增能力，实测 3000 提交仓库上的单提交 diff 在 < 100ms 量级（未单独设门禁，理由见下）
@@ -90,16 +112,8 @@ CI 矩阵包含 `windows-latest`。
 
 ## 验证记录（本机 macOS，2026-10-09）
 
-```
-cargo test --workspace      41 passed / 0 failed
-  ├ lib 单测                 8（含 diffparse 5 + parse_ahead_behind 2 …）
-  ├ tests/diff.rs           10
-  ├ tests/snapshot.rs       16（含上游 5）
-  ├ tests/perf.rs            1
-  └ CLI 集成                 6
-biome check src             18 files，无问题
-tsc --noEmit                无错误
-vitest run                  17 passed（graph 9 + diff 8）
-vite build                  ✓ built
-read-only-guard --self-test 18/18
-```
+> 本卡完成时（TASK-007 批次）：`cargo test --workspace` 41 passed、
+> `vitest run` 17 passed、`read-only-guard --self-test` 18/18。
+>
+> 后续 TASK-008/009 批次补齐契约（`patch` / `truncated`）后的全量门禁见
+> [`ROADMAP.md`](../ROADMAP.md) 第四节。

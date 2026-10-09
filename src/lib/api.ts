@@ -113,8 +113,12 @@ export interface FileStat {
 }
 
 export interface CommitDetail {
-  commit: CommitInfo;
+  info: CommitInfo;
   files: FileStat[];
+  /** 原始 unified diff 正文，供 CLI / MCP / Agent 直接消费。 */
+  patch: string;
+  /** 是否因超出上限被截断（原始文本 2 MiB / 结构化 5000 行）。 */
+  truncated: boolean;
 }
 
 export async function inspectRepo(path: string): Promise<RepoSnapshot> {
