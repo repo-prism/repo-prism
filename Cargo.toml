@@ -19,3 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 thiserror = "1"
+# 本地 LLM 摘要层（TASK-013）用的极小 HTTP 客户端。
+# `default-features = false` 关掉 ureq 自带的 TLS：本项目的 endpoint 被
+# `summarizer::OllamaConfig::validate` 限制为 http:// + 回环地址，
+# localhost 上不需要 TLS。关掉它可整棵砍掉 rustls / ring / webpki 依赖树，
+# 既缩短构建也缩小供应链面——这与「不把代码发到云端」是同一件事的两面。
+ureq = { version = "2", default-features = false, features = ["json"] }

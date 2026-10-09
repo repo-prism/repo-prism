@@ -6,6 +6,7 @@
 pub mod analysis;
 pub mod git;
 pub mod model;
+pub mod summarizer;
 
 mod diffparse;
 
@@ -15,3 +16,7 @@ pub use analysis::{
 };
 pub use git::Git;
 pub use model::*;
+pub use summarizer::{
+    build_changes_prompt, build_commit_prompt, OllamaConfig, OllamaSummarizer, DEFAULT_ENDPOINT,
+    DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS, MAX_TIMEOUT_SECS,
+};
