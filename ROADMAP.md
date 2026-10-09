@@ -54,7 +54,8 @@
 | `005` | [TASK-016](TASKS/016-virtual-scroll.md) | 前端虚拟滚动 | ✅ |
 | `006` | — | 发布 v0.2.0（tag `v0.2.0`） | ✅ 2026-10-09 |
 | v0.3 | [TASK-017](TASKS/017-git-read-perf.md) | Git 读取层性能：减 spawn（原定「`gix` 后端」，经 [`ADR-002`](ADR/002-git-backend-evolution.md) 改手段） | ✅ 2026-10-09 |
-| v0.3 | TASK-018–020 | 增量缓存 / 多仓库 / PR 只读视图 | ⬜ 未开始 |
+| v0.3 | [TASK-018](TASKS/018-incremental-cache.md) | 增量加载与本地缓存：引用映射跨调用复用（blame 未做，理由见卡片） | ✅ 2026-10-09 |
+| v0.3 | TASK-019–020 | 多仓库 / PR 只读视图 | ⬜ 未开始 |
 
 > **TASK-017 的手段变更**是 v0.3 的第一个决策点。血统里它的主题是「`gix` 后端」，
 > `ADR-002` 实测后否决了换后端，改为在同一后端里合并子进程；**目标（大仓库首屏性能）未变**，
@@ -82,8 +83,9 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **132 passed**（core 104 / CLI 14 / MCP 14） |
-| 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7） |
+| Rust 测试 | `cargo test --workspace` | ✅ **144 passed**（core 116 / CLI 14 / MCP 14） |
+| 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7）。**该门禁在 TASK-018 里一字未改** —— 缓存是 opt-in，见下 |
+| 引用缓存失效（`TASK-018`） | `cargo test -p repo-prism-core --test cache` | ✅ **12 passed**：1 条「缓存确实命中」+ 7 条「引用一变必须失效」+ 4 条边界（工作区状态从不缓存 / 不开启时行为不变 / 链接工作树 / 分支改名）。失败路径由 6 个探针反证 |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 27 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
@@ -94,9 +96,10 @@
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
-**core 104 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
+**core 116 项的构成**：lib 53（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析与
 `parse_head_meta` 等）/ analysis 5 / diff 10 / perf 2 / remote 5 / snapshot 16 /
-`summarizer_http` 8（P-07）/ **`summarizer_egress` 1 + `summarizer_contract` 4（P-08）**。
+`summarizer_http` 8（P-07）/ `summarizer_egress` 1 + `summarizer_contract` 4（P-08）/
+**`cache` 12（TASK-018）**。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
 
@@ -106,6 +109,12 @@
 而**毫秒阈值会随 runner 抖动**（实测同机连跑三次 208/470/576ms），
 **spawn 次数不会**。所以 spawn 次数是比毫秒更硬、且能定位到具体方法的门禁，
 `tests/scale.rs`（`#[ignore]`）保留「改动前」的 argv 序列作为可重测的对照。
+
+**TASK-018 的缓存为什么是 opt-in**：如果 `snapshot()` 默认走缓存，同一个方法就有了
+冷/热两个 spawn 数字，上面那条门禁会退化成「看测试跑的顺序」—— 它就不再是契约。
+所以缓存只在 `Git::open_cached`（桌面端会话）下开启，`Git::open` 的行为与逐次成本
+**逐字不变**，门禁一字未改且仍然通过。缓存自己的契约（命中省几次、以及更重要的
+**引用一变就必须失效**）在 `tests/cache.rs`，那里数的是真实子进程次数。
 
 **`summarizer_*` 三个测试文件各补什么**：`summarizer.rs` 的 13 个单测是纯函数，
 而真正把字节送出进程的调用在 P-07 之前**一次都没执行过**（本机无 Ollama）。
@@ -166,10 +175,13 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
    改为在同一后端里合并子进程：`snapshot()` 5 → 2、`snapshot()+commits()` 7 → 4，
    并把 **spawn 次数**做成机器无关的门禁。`gix` 转为条件触发
    （触发条件写在 `ADR/002` 第五节：真实大仓库上首屏 > 1s 且瓶颈已不是 spawn）。
-2. **TASK-018 增量缓存** —— 提交图分页与 diff 结果的本地缓存。
-   `ADR/002` 已指出其中一条可量化的收益：把共用的引用映射跨调用缓存下来，
-   可以把 4 次 spawn 再降到 3 次
-3. **TASK-019 多仓库工作区**（US-9）
+2. ~~**TASK-018 增量缓存**~~ —— ✅ 2026-10-09。`ADR/002` 承诺的那一步（共用引用映射，
+   `snapshot()+commits()` 4 → 3 次 spawn）已兑现；打开仓库的四条命令由 **13 → 8** 次。
+   交付范围与**未做的部分**（blame 是尚未实现的产品能力；提交详情缓存因失效判据
+   暂不可证而留待）见 [`TASKS/018`](TASKS/018-incremental-cache.md)。
+   缓存刻意做成 **opt-in**（`Git::open_cached`），以保住那条「与状态无关」的 spawn 门禁。
+3. **TASK-019 多仓库工作区**（US-9）。当前 `AppState` 只保留一个 `RepoSession`，
+   多仓库需要把会话换成按路径索引的表 —— 缓存的失效判据可以原样复用。
 4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界
 
 ### 发布收尾（v0.2.0 之后立刻要做）

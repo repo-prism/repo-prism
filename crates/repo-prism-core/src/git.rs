@@ -1,10 +1,13 @@
 use crate::diffparse::{parse_name_status, parse_numstat, parse_patch};
 use crate::model::*;
 use anyhow::{Context, Result};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// `git log` 的字段格式：`\x1f` 分隔字段、`\x1e` 分隔记录，
 /// 避免提交信息中的换行、制表符、`|` 等字符造成解析歧义。
@@ -24,16 +27,35 @@ const MAX_DIFF_BYTES: usize = 2 * 1024 * 1024;
 /// 只靠 `refname:short` 无法区分（分支与标签可能同名）。
 const REF_FORMAT: &str = "--format=%(objectname)%09%(refname:short)%09%(refname)%09%(HEAD)";
 
+/// 缓存引用映射时，参与指纹的引用命名空间（TASK-018）。
+///
+/// 与 `refs()` 实际传给 `for-each-ref` 的三个前缀一致：多算会让缓存无谓失效，
+/// 少算会让缓存**静默过期**。
+const REF_PREFIXES: [&str; 3] = ["refs/heads", "refs/tags", "refs/remotes"];
+
+/// 引用指纹的字节预算（4 MiB）。超出即放弃缓存、每次都重读 ——
+/// 宁可多起一个子进程，也不要让「算缓存键」比它省下的那次调用更贵。
+const REF_FINGERPRINT_BUDGET: usize = 4 * 1024 * 1024;
+
 /// 一次 `for-each-ref` 的三种视图。
 ///
 /// 合并的理由见 `ADR/002`：`snapshot()` 原先为分支、标签、ref 映射各起一次
 /// `for-each-ref`，而三者读的是同一份引用表 —— 实测每起一次子进程约 30ms，
 /// 三次合并成一次是把 `snapshot()` 从 5 次 spawn 降到 2 次的主要来源。
+#[derive(Clone)]
 struct Refs {
     branches: Vec<BranchInfo>,
     tags: Vec<TagInfo>,
     /// sha → 指向它的引用短名，用于给提交列表打 ref 标签。
     by_sha: HashMap<String, Vec<String>>,
+}
+
+/// 引用映射的缓存条目（TASK-018）。
+///
+/// `fingerprint` 与 [`ref_fingerprint`] 同源：只有它逐位相同才认为缓存仍有效。
+struct CachedRefs {
+    fingerprint: u64,
+    refs: Refs,
 }
 
 /// 从 `status --porcelain=v2 --branch` 的头部行里拿到的分支与 HEAD。
@@ -50,8 +72,24 @@ struct HeadMeta {
 ///
 /// **安全约束**：只允许白名单内的只读命令。
 /// CI 会静态扫描本文件的 `Command::new("git")` 调用。
+///
+/// # 关于引用映射缓存（TASK-018）
+///
+/// 缓存**不是默认行为**：只有 [`Git::open_cached`] 构造的实例才带缓存，
+/// [`Git::open`] 的每次调用都重新读一遍引用，行为与逐次成本与 TASK-018 之前完全一致。
+/// 这样做的理由有两条：
+///
+/// 1. 现有的 spawn 次数门禁（`perf.rs::spawn_counts_are_pinned`）钉的是
+///    「每次调用起几个进程」这种**与状态无关**的量。缓存一旦成为默认行为，
+///    同一个方法就有了冷/热两个数字，门禁会退化成「看测试跑的顺序」。
+/// 2. 缓存的有效性靠 [`ref_fingerprint`] 保证，这是一个需要单独成立的性质，
+///    值得有自己的一组测试，而不是混进别处的断言里。
 pub struct Git {
     repo: PathBuf,
+    /// 绝对 git 目录。`HEAD` 在这里，且**链接工作树下每个工作树各有一份**。
+    git_dir: PathBuf,
+    /// 绝对公共 git 目录。`refs/` 与 `packed-refs` 在这里（链接工作树共享）。
+    common_dir: PathBuf,
     /// 本实例自 `open()` 起发起的 `git` 子进程次数。
     ///
     /// 存在的理由（`ADR/002`）：实测表明**耗时几乎完全由子进程数决定**，
@@ -59,25 +97,67 @@ pub struct Git {
     /// 耗时相同）。因此「spawn 次数」是一个**与机器无关**的性能契约，
     /// 比毫秒阈值更适合做回归门禁 —— 毫秒数会随 runner 抖动，spawn 数不会。
     spawns: AtomicUsize,
+    /// 引用映射缓存。`None` 表示不缓存（[`Git::open`]）。
+    refs_cache: Option<Mutex<Option<CachedRefs>>>,
 }
 
 impl Git {
+    /// 打开仓库，**不缓存**引用映射。每次读取都重新起一次 `for-each-ref`。
+    ///
+    /// 适合一次性使用（CLI 命令、测试）；需要跨调用复用的宿主请用
+    /// [`Git::open_cached`]。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_inner(path.as_ref(), false)
+    }
+
+    /// 打开仓库，并**跨调用复用引用映射**（TASK-018）。
+    ///
+    /// 收益来自一个实测事实：单个命令内部只会读一次引用，所以缓存的价值
+    /// **完全在多次命令之间**。桌面端打开一个仓库要跑四条命令
+    /// （快照 / 提交 / 分析 / 远端），其中三条都要引用映射 ——
+    /// 缓存在这里的意义是把「每条命令各读一次」变成「整个会话读一次」。
+    ///
+    /// 失效由 [`ref_fingerprint`] 自动判定，不需要调用方声明「仓库变了」。
+    pub fn open_cached(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_inner(path.as_ref(), true)
+    }
+
+    fn open_inner(path: &Path, cache_refs: bool) -> Result<Self> {
         let out = Command::new("git")
             .arg("-C")
             .arg(path)
-            .arg("rev-parse")
-            .arg("--show-toplevel")
+            .args([
+                "rev-parse",
+                // 必须放在被它影响的选项之前：否则 `--git-common-dir` 会相对 cwd 输出
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--absolute-git-dir",
+                "--git-common-dir",
+            ])
             .output()
             .context("failed to run git rev-parse")?;
         if !out.status.success() {
             anyhow::bail!("not a git repository: {}", path.display());
         }
-        let repo = String::from_utf8(out.stdout)?.trim().to_string();
+        let text = String::from_utf8(out.stdout)?;
+        let mut lines = text.lines();
+        let repo = lines.next().unwrap_or("").trim();
+        let git_dir = lines.next().unwrap_or("").trim();
+        let common_dir = lines.next().unwrap_or("").trim();
+        // 三行缺一不可：缓存要靠 git_dir / common_dir 定位引用数据，
+        // 缺了就会去读一个空路径，指纹恒等于「空目录的哈希」——缓存永不失效。
+        if repo.is_empty() || git_dir.is_empty() || common_dir.is_empty() {
+            anyhow::bail!(
+                "git rev-parse did not report the repository layout for {}",
+                path.display()
+            );
+        }
         Ok(Self {
             repo: repo.into(),
+            git_dir: git_dir.into(),
+            common_dir: common_dir.into(),
             spawns: AtomicUsize::new(1),
+            refs_cache: cache_refs.then(|| Mutex::new(None)),
         })
     }
 
@@ -269,12 +349,49 @@ impl Git {
         Ok(Diff { files, truncated })
     }
 
+    /// 引用映射，带缓存（仅 [`Git::open_cached`] 构造的实例）。
+    ///
+    /// 命中判据是 [`ref_fingerprint`]：它直接哈希 git 解析引用所用的那几份数据，
+    /// 因此「仓库在两次调用之间被改了」会被发现，缓存不会静默过期。
+    ///
+    /// 两种情况退化为「每次都重读」：实例没开缓存，或指纹算不出来
+    /// （读失败 / 引用数据超出预算）。**退化的方向永远是「多起一个子进程」，
+    /// 而不是「用一份可能过期的数据」**。
+    fn refs(&self) -> Result<Refs> {
+        let Some(slot) = &self.refs_cache else {
+            return self.read_refs();
+        };
+
+        let fingerprint = ref_fingerprint(&self.git_dir, &self.common_dir);
+        if let Some(fingerprint) = fingerprint {
+            if let Ok(cache) = slot.lock() {
+                if let Some(hit) = cache.as_ref().filter(|c| c.fingerprint == fingerprint) {
+                    return Ok(hit.refs.clone());
+                }
+            }
+        }
+
+        let refs = self.read_refs()?;
+        // 锁中毒时同样只是不缓存，不影响到手的结果。
+        if let Some(fingerprint) = fingerprint {
+            if let Ok(mut cache) = slot.lock() {
+                *cache = Some(CachedRefs {
+                    fingerprint,
+                    refs: refs.clone(),
+                });
+            }
+        }
+        Ok(refs)
+    }
+
     /// 一次 `for-each-ref` 同时给出分支、标签与「sha → 引用短名」映射（`ADR/002`）。
     ///
     /// 原先这是三次独立调用，读的却是同一张引用表。合并后**总输出顺序不变**：
     /// 原来 `ref_map()` 就是一次带三个前缀的调用，git 按完整 refname 排序，
     /// 因此 heads → remotes → tags 的顺序与合并前逐字相同。
-    fn refs(&self) -> Result<Refs> {
+    ///
+    /// 前缀列表与 [`REF_PREFIXES`] 必须一致 —— 后者是缓存指纹的取样范围。
+    fn read_refs(&self) -> Result<Refs> {
         let out = self.run(&[
             "for-each-ref",
             REF_FORMAT,
@@ -492,6 +609,97 @@ fn parse_head_meta(branch_head: Option<&str>, branch_oid: Option<&str>) -> HeadM
             None => true,
         },
     }
+}
+
+/// 引用映射的内容指纹（TASK-018）。
+///
+/// # 为什么不用 mtime
+///
+/// 缓存唯一不可接受的失效是「过期了却没人知道」。文件时间戳不足以判定这件事：
+/// 多数文件系统的时间戳粒度到秒，而 `git update-ref` 改写一个已存在的松引用时
+/// **连文件大小都不变**（内容恒为 40/64 位十六进制 + 换行）。同一秒内的改写会被漏掉。
+///
+/// # 改成什么
+///
+/// 直接哈希 git 用来解析引用的那几份数据本身：
+///
+/// - `<git-dir>/HEAD` —— 决定当前分支与 `%(HEAD)` 标记；链接工作树下每个工作树各一份
+/// - `<common-dir>/packed-refs` —— 多数仓库的引用都在这里
+/// - `<common-dir>/refs/{heads,tags,remotes}/**` —— 松引用，递归收集后排序
+///
+/// **相对路径也参与哈希**，否则「改名但内容相同」不会改变指纹。
+/// 排序保证指纹与目录遍历顺序无关。
+///
+/// 读失败或总量超出 [`REF_FINGERPRINT_BUDGET`] 时返回 `None`，
+/// 调用方据此退化为「每次都重读」。这是刻意选的偏向：
+/// 宁可多起一个子进程，也不要拿一份可能过期的映射继续用。
+fn ref_fingerprint(git_dir: &Path, common_dir: &Path) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    let mut budget = REF_FINGERPRINT_BUDGET;
+
+    // HEAD 缺失说明这不是一个可用的仓库布局，直接放弃缓存。
+    hash_file(&mut hasher, &git_dir.join("HEAD"), &mut budget)?;
+
+    // packed-refs 不存在是正常的（全部为松引用），但存在却读不了则放弃缓存。
+    let packed = common_dir.join("packed-refs");
+    if packed.exists() {
+        hash_file(&mut hasher, &packed, &mut budget)?;
+    }
+
+    let mut loose = Vec::new();
+    for prefix in REF_PREFIXES {
+        collect_files(&common_dir.join(prefix), &mut loose)?;
+    }
+    loose.sort();
+    for file in &loose {
+        file.strip_prefix(common_dir)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .hash(&mut hasher);
+        hash_file(&mut hasher, file, &mut budget)?;
+    }
+
+    Some(hasher.finish())
+}
+
+/// 把单个文件的内容并进指纹。读不了或超出预算都返回 `None`（→ 放弃缓存）。
+fn hash_file(hasher: &mut DefaultHasher, path: &Path, budget: &mut usize) -> Option<()> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > *budget {
+        return None;
+    }
+    *budget -= bytes.len();
+    bytes.hash(hasher);
+    Some(())
+}
+
+/// 递归收集目录下的所有文件。
+///
+/// 返回 `None` 表示**指纹不完整，必须放弃缓存**。这里刻意区分两种情况：
+///
+/// - 目录不存在 → 是该命名空间为空（例如仓库没有标签），指纹照样成立，返回 `Some`
+/// - 目录存在却读不了（权限、IO 错误、条目损坏）→ 指纹会少覆盖一块内容，
+///   表现为「缓存该失效时没失效」，因此返回 `None`
+///
+/// 区别对待的理由：前者的「缺失」本身是确定的事实，后者的「缺失」是未知。
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) if !dir.is_dir() => return Some(()),
+        Err(_) => return None,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return None;
+        };
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Some(())
 }
 
 /// 把 remote URL 解析成 `host / owner / repo`。

@@ -32,6 +32,14 @@
 //! 「省了多少」这件事**可以被重新测量**，而不是只能引用一次历史结论。
 //! 对应的机器无关门禁在 `perf.rs::spawn_counts_are_pinned`。。
 //!
+//! # 与 TASK-018（引用缓存）的关系
+//!
+//! 本文件测的是**不缓存**那条路径：全文用的是 `Git::open`，而缓存只在
+//! `Git::open_cached` 下开启（理由见 `git.rs` 里 `Git` 的文档）。
+//! 因此上面的规模曲线与 `ADR/002` 的原始数据**仍然逐项可比**，
+//! 不会因为引入了缓存而悄悄换了含义。
+//! 缓存自己的效果在第六节单独测，并同样以「几次 spawn」为单位。
+//!
 //! # 关于噪声
 //!
 //! 本机单个 `git` 子进程的墙钟耗时在 37–66ms 之间抖动（沙箱环境下偏高）。
@@ -168,6 +176,29 @@ fn proposed_sequence() -> Vec<Vec<&'static str>> {
             "refs/tags/",
             "refs/remotes/",
         ],
+    ]
+}
+
+/// TASK-018：开启引用缓存之后，同样的 `snapshot() + commits()` 是 **3 次**。
+///
+/// 与 [`proposed_sequence`] 逐字相同，只少一次 `for-each-ref` ——
+/// 因为 `commits()` 复用了 `snapshot()` 已经读到的引用映射。
+///
+/// **这条序列是「模型」而不是「测量」**：它手工略去了那一次调用，
+/// 用来回答「若缓存生效，spawn 数会是多少」。缓存本身是否真的生效，
+/// 由 `cache.rs` 的断言负责（那些用例会数真实子进程次数）。
+/// 两者分开写，是为了不让「我以为我省了」冒充「我测到我省了」。
+fn cached_sequence() -> Vec<Vec<&'static str>> {
+    vec![
+        vec!["status", "--porcelain=v2", "--branch", "-z"],
+        vec![
+            "for-each-ref",
+            MERGED_FMT,
+            "refs/heads/",
+            "refs/tags/",
+            "refs/remotes/",
+        ],
+        vec!["log", "--all", "-n200", "--skip=0"],
     ]
 }
 
@@ -386,6 +417,33 @@ fn scaling_curve_of_the_system_git_backend() {
     println!("  若「折合每次」在两组测量间明显不一致，以 A/B 对比为准：");
     println!("  A/B 把两组序列放在同一进程内交替执行，环境噪声同向作用于两边；");
     println!("  而单独重复同一条命令会受进程创建节流/缓存淘汰影响，系统性偏高。");
+
+    println!();
+    println!("=== 六、引用缓存（TASK-018）把 snapshot()+commits() 从 4 次降到 3 次 ===");
+    println!("  注意：这一节比的是**序列里的 spawn 次数**（spawn 数与机器无关），");
+    println!("  不是毫秒。缓存是否真的生效由 cache.rs 的断言负责，本节只给量级。");
+    let merged = proposed_sequence();
+    let cached = cached_sequence();
+    let m = time_sequence(Some(repo.path()), &merged);
+    let c = time_sequence(Some(repo.path()), &cached);
+    println!(
+        "  不缓存 {} 次 spawn（ADR-002 的成果）：{:>6.0}ms",
+        merged.len(),
+        ms(m)
+    );
+    println!(
+        "  开缓存 {} 次 spawn（commits 复用 snapshot 读到的引用）：{:>6.0}ms",
+        cached.len(),
+        ms(c)
+    );
+    println!(
+        "  差 {:.0}ms —— **不要把这个数当结论**：同一次运行里单次 spawn 的固定成本\n  \
+         就有 {:.0}-{:.0}ms，毫秒差完全落在噪声带内（见 ADR-002 第 2.5 节）。\n  \
+         可靠的结论只有一条：spawn 次数 4 → 3。",
+        ms(m) - ms(c),
+        ms(spawn_1_post),
+        ms(spawn_5_post) / 5.0
+    );
 
     drop(repo);
 }

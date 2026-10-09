@@ -10,12 +10,60 @@ use tauri::State;
 // ---------------------------------------------------------------------------
 // 只读仓库命令
 // ---------------------------------------------------------------------------
+// TASK-018：所有仓库命令都通过**同一个会话**执行，而不是各自 `Git::open`。
+//
+// 收益来源是一个实测事实：单个命令内部只会读一次引用映射，所以引用缓存的
+// 价值**完全在命令之间**。打开一个仓库要跑四条命令（快照 / 提交 / 分析 / 远端），
+// 其中三条都要引用映射 —— 会话在则整个打开过程只读一次。
+//
+// 代价与边界：会话被一把锁串起来，因此这几条命令不再真正并发（它们本来也是在
+// 争同一批 git 进程）。多仓库工作区是 TASK-019 的范围，这里一次只留一个会话。
+
+/// 当前打开的仓库会话。
+///
+/// `requested` 与 `git.path()` 都参与命中判断：前端先拿用户输入的路径调
+/// `inspect_repo`，之后改用返回的 `snapshot.path`（已解析的仓库根）调其余命令。
+/// 只看输入字符串会在这两步之间必然落空一次。
+struct RepoSession {
+    requested: PathBuf,
+    git: Git,
+}
+
+/// 取得（必要时建立）`path` 对应的仓库会话。
+fn session_git<'a>(slot: &'a mut Option<RepoSession>, path: &str) -> Result<&'a Git, String> {
+    let requested = PathBuf::from(path);
+    let hit = slot
+        .as_ref()
+        .is_some_and(|session| session.requested == requested || session.git.path() == requested);
+    if !hit {
+        // 换仓库即整体替换，顺带丢掉上一个仓库的缓存 —— 不做跨仓库共享。
+        let git = Git::open_cached(&requested).map_err(|e| e.to_string())?;
+        *slot = Some(RepoSession { requested, git });
+    }
+    Ok(&slot.as_ref().expect("session was just populated").git)
+}
+
+/// 在仓库会话上执行一次只读读操作。
+///
+/// 对错误类型泛化，是为了不必为本文件新增一条 `anyhow` 依赖边：
+/// core 的公开方法返回 `anyhow::Result`，而这里只需要 `Display`。
+/// 本项目的依赖面是**刻意收窄**的（`ADR/002` 第四节），不为几行便利加边。
+fn with_git<T, E: std::fmt::Display>(
+    state: &State<'_, AppState>,
+    path: &str,
+    f: impl FnOnce(&Git) -> Result<T, E>,
+) -> Result<T, String> {
+    let mut slot = state
+        .repo
+        .lock()
+        .map_err(|_| "repo session is unavailable: the lock was poisoned".to_string())?;
+    let git = session_git(&mut slot, path)?;
+    f(git).map_err(|e| e.to_string())
+}
 
 #[tauri::command]
-fn inspect_repo(path: String) -> Result<RepoSnapshot, String> {
-    Git::open(&path)
-        .and_then(|g| g.snapshot())
-        .map_err(|e| e.to_string())
+fn inspect_repo(path: String, state: State<'_, AppState>) -> Result<RepoSnapshot, String> {
+    with_git(&state, &path, Git::snapshot)
 }
 
 #[tauri::command]
@@ -23,34 +71,38 @@ fn get_commits(
     path: String,
     limit: Option<usize>,
     skip: Option<usize>,
+    state: State<'_, AppState>,
 ) -> Result<Vec<CommitInfo>, String> {
     let limit = limit.unwrap_or(200).min(2000);
     let skip = skip.unwrap_or(0);
-    Git::open(&path)
-        .and_then(|g| g.commits(limit, skip))
-        .map_err(|e| e.to_string())
+    with_git(&state, &path, |git| git.commits(limit, skip))
 }
 
 #[tauri::command]
-fn get_commit_detail(path: String, sha: String) -> Result<CommitDetail, String> {
-    Git::open(&path)
-        .and_then(|g| g.commit_detail(&sha))
-        .map_err(|e| e.to_string())
+fn get_commit_detail(
+    path: String,
+    sha: String,
+    state: State<'_, AppState>,
+) -> Result<CommitDetail, String> {
+    with_git(&state, &path, |git| git.commit_detail(&sha))
 }
 
 #[tauri::command]
-fn get_commit_diff(path: String, sha: String) -> Result<Diff, String> {
-    Git::open(&path)
-        .and_then(|g| g.commit_diff(&sha))
-        .map_err(|e| e.to_string())
+fn get_commit_diff(path: String, sha: String, state: State<'_, AppState>) -> Result<Diff, String> {
+    with_git(&state, &path, |git| git.commit_diff(&sha))
 }
 
 /// 任意两点之间的 Diff。`from` / `to` 皆为空时为「工作区 vs 索引」。
 #[tauri::command]
-fn get_diff(path: String, from: Option<String>, to: Option<String>) -> Result<Diff, String> {
-    Git::open(&path)
-        .and_then(|g| g.diff(from.as_deref(), to.as_deref()))
-        .map_err(|e| e.to_string())
+fn get_diff(
+    path: String,
+    from: Option<String>,
+    to: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Diff, String> {
+    with_git(&state, &path, |git| {
+        git.diff(from.as_deref(), to.as_deref())
+    })
 }
 
 /// 未提交改动的本地风险分析（US-7 的本地部分）。
@@ -59,17 +111,14 @@ fn get_diff(path: String, from: Option<String>, to: Option<String>) -> Result<Di
 /// 取不到行数时**退化为纯路径规则**而不是让整个分析失败 —— 少一条规则命中
 /// 是可接受的降级，整个面板报错不可接受。
 #[tauri::command]
-fn analyze_changes(path: String) -> Result<ChangeAnalysis, String> {
-    let git = Git::open(&path).map_err(|e| e.to_string())?;
-    analyze(&git)
+fn analyze_changes(path: String, state: State<'_, AppState>) -> Result<ChangeAnalysis, String> {
+    with_git(&state, &path, analyze)
 }
 
 /// `origin` remote 的结构化信息（US-8）。没有 remote 时是 `null`，不是错误。
 #[tauri::command]
-fn get_remote_info(path: String) -> Result<Option<RemoteInfo>, String> {
-    Git::open(&path)
-        .and_then(|g| g.remote_info())
-        .map_err(|e| e.to_string())
+fn get_remote_info(path: String, state: State<'_, AppState>) -> Result<Option<RemoteInfo>, String> {
+    with_git(&state, &path, |git| git.remote_info())
 }
 
 fn analyze(git: &Git) -> Result<ChangeAnalysis, String> {
@@ -120,12 +169,15 @@ impl Default for AiSettings {
 
 struct AppState {
     ai: Mutex<AiSettings>,
+    /// 当前打开的仓库会话（TASK-018）。见 [`RepoSession`]。
+    repo: Mutex<Option<RepoSession>>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             ai: Mutex::new(load_settings()),
+            repo: Mutex::new(None),
         }
     }
 }
@@ -212,8 +264,7 @@ fn summarize_changes(path: String, state: State<'_, AppState>) -> Result<Option<
     if !settings.enabled {
         return Ok(None);
     }
-    let git = Git::open(&path).map_err(|e| e.to_string())?;
-    let analysis = analyze(&git)?;
+    let analysis = with_git(&state, &path, analyze)?;
     if analysis.total_files == 0 {
         return Ok(Some("工作区干净，没有可总结的改动。".to_string()));
     }
@@ -231,9 +282,7 @@ fn summarize_commit(
     if !settings.enabled {
         return Ok(None);
     }
-    let detail = Git::open(&path)
-        .and_then(|g| g.commit_detail(&sha))
-        .map_err(|e| e.to_string())?;
+    let detail = with_git(&state, &path, |git| git.commit_detail(&sha))?;
     let files: Vec<String> = detail.files.iter().map(|f| f.path.clone()).collect();
     let prompt = build_commit_prompt(&detail.info.subject, detail.info.body.as_deref(), &files);
     Ok(summarizer_for(&settings)?.generate(&prompt))
