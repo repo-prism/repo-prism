@@ -23,3 +23,4 @@
 | [P-02](P-02-readonly-guard-hardening.md) | 只读白名单加固到参数级 | ✅ 完成 |
 | [P-03](P-03-deps-ci-hygiene.md) | 依赖与 CI 卫生（pnpm、build、性能门禁） | ✅ 完成 |
 | [P-04](P-04-docs-consistency.md) | SPEC 补全 + SECURITY 对齐 | ⚠️ 已被取代（其 US 编号偏差由 TASK-008/009 同轮修正） |
+| [P-05](P-05-guard-scope-and-write-verbs.md) | 只读扫描器补调用门槛与写动词黑名单 | ✅ 完成 |
