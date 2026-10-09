@@ -3,21 +3,30 @@
 //
 // 为什么需要它：版本号在本项目里有**三处**独立声明，谁都能单独改。
 // 只改一处就会出一个「界面显示 0.2.0、安装包元数据写 0.1.0」的版本，
-// 而且直到用户装完才发现。这个脚本把三处绑成一个断言。
+// 而且直到用户装完才发现。这个脚本把它们绑成一个断言：
 //
-//   1. package.json                    → version
-//   2. Cargo.toml（workspace）          → [workspace.package] version
-//   3. src-tauri/tauri.conf.json       → version
+//   1. package.json                → version
+//   2. Cargo.toml（workspace）     → [workspace.package] version
+//   3. src-tauri/tauri.conf.json   → version
 //
-// 其余 crate 的 Cargo.toml 写的是 `version.workspace = true`，自动继承，
-// 因此不需要单独校验 —— 但脚本会顺带确认它们确实是继承而非硬编码。
+// 另外校验两件同样容易漏、而且会真的炸掉发布的事：
+//
+//   4. **每个 workspace 成员都必须继承版本**（`version.workspace = true`）。
+//      成员清单直接从根 Cargo.toml 的 `[workspace] members` 里读，不再依赖
+//      「crates/ 下面一层就是 crate」这种目录假设 —— v0.2.0 正是栽在这个假设上：
+//      src-tauri 自己**就是**那个 crate，不是装 crate 的目录，于是它硬编码的
+//      `version = "0.1.0"` 一路放行，直到发版前人工核对才发现。
+//   5. **Cargo.lock 里每个成员的版本必须与当前版本号一致**。
+//      release.yml 用 `--locked` 构建 CLI / MCP，锁文件过期会在发布那一刻直接失败；
+//      而 CI 的 clippy / test 不带 `--locked`，反手就把锁文件改掉、当场变绿 ——
+//      这个错只有打 tag 时才炸，所以必须在这里拦住。
 //
 // 用法：
-//   node scripts/check-versions.mjs                      # 只校验三处一致
+//   node scripts/check-versions.mjs                      # 只校验一致性
 //   node scripts/check-versions.mjs --expect 0.2.0       # 还要求等于指定版本
 //   node scripts/check-versions.mjs --expect-ref v0.2.0  # 用 tag 校验（自动去 v）
 
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -32,38 +41,71 @@ function read(relativePath) {
   return readFileSync(full, "utf8");
 }
 
-/** 取出 Cargo.toml 中 `[workspace.package]` 段的 version。 */
-function workspaceCargoVersion() {
-  const text = read("Cargo.toml");
-  const lines = text.split("\n");
+/** 读 TOML 里某个段（`[section]`）下 `key = "value"` 的值，读不到返回 null。 */
+function sectionValue(text, section, key) {
   let inside = false;
-  for (const raw of lines) {
+  for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (line.startsWith("[")) {
-      inside = line === "[workspace.package]";
+      inside = line === section;
       continue;
     }
     if (!inside) continue;
-    const match = /^version\s*=\s*"([^"]+)"/.exec(line);
+    const match = new RegExp(`^${key}\\s*=\\s*"([^"]+)"`).exec(line);
     if (match) return match[1];
   }
-  throw new Error("Cargo.toml 里找不到 [workspace.package] 段的 version");
+  return null;
 }
 
-/** 确认各 crate 走的是继承而不是硬编码版本。 */
+/** 根 Cargo.toml 的 `[workspace] members` 列出的成员目录。 */
+function workspaceMembers() {
+  const match = /\[workspace\][\s\S]*?members\s*=\s*\[([\s\S]*?)\]/.exec(read("Cargo.toml"));
+  if (!match) {
+    throw new Error("Cargo.toml 里找不到 [workspace] members");
+  }
+  return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/** 成员在 `[package]` 段声明的包名。 */
+function packageName(member) {
+  return sectionValue(read(`${member}/Cargo.toml`), "[package]", "name");
+}
+
+/** 4. 成员必须是继承版本，不能硬编码。 */
 function checkInheritance() {
   const problems = [];
-  const dirs = ["crates", "src-tauri"];
-  for (const dir of dirs) {
-    const base = join(root, dir);
-    if (!existsSync(base)) continue;
-    for (const name of readdirSync(base)) {
-      const manifest = join(base, name, "Cargo.toml");
-      if (!existsSync(manifest)) continue;
-      const text = readFileSync(manifest, "utf8");
-      if (/^version\s*=\s*"/m.test(text)) {
-        problems.push(`${dir}/${name}/Cargo.toml 硬编码了 version，应改为 version.workspace = true`);
-      }
+  for (const member of workspaceMembers()) {
+    const manifest = `${member}/Cargo.toml`;
+    // `version = "…"` 命中即为硬编码；`version.workspace = true` 不会命中
+    // （`version` 后面跟的是 `.`，不是 `=`）。
+    if (/^version\s*=/m.test(read(manifest))) {
+      problems.push(`${manifest} 硬编码了 version，应改成 version.workspace = true`);
+    }
+  }
+  return problems;
+}
+
+/** 5. Cargo.lock 里的成员版本必须与当前版本号一致。 */
+function checkLockfile(version) {
+  const problems = [];
+  const lock = read("Cargo.lock");
+  for (const member of workspaceMembers()) {
+    const name = packageName(member);
+    if (!name) {
+      problems.push(`${member}/Cargo.toml 的 [package] 段里没有 name`);
+      continue;
+    }
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(
+      `\\[\\[package\\]\\]\\nname = "${escaped}"\\nversion = "([^"]+)"`,
+    ).exec(lock);
+    if (!match) {
+      problems.push(`Cargo.lock 里找不到 workspace 成员 ${name}`);
+    } else if (match[1] !== version) {
+      problems.push(
+        `Cargo.lock 里 ${name} 是 ${match[1]}，与 ${version} 不一致 —— 改版本号时` +
+          "必须把 Cargo.lock 一起提交，否则 release 的 --locked 构建会失败",
+      );
     }
   }
   return problems;
@@ -93,10 +135,12 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
 
   const sources = [
-    { label: "package.json", path: "package.json", version: JSON.parse(read("package.json")).version },
-    { label: "Cargo.toml [workspace.package]", path: "Cargo.toml", version: workspaceCargoVersion() },
+    { path: "package.json", version: JSON.parse(read("package.json")).version },
     {
-      label: "src-tauri/tauri.conf.json",
+      path: "Cargo.toml [workspace.package]",
+      version: sectionValue(read("Cargo.toml"), "[workspace.package]", "version"),
+    },
+    {
       path: "src-tauri/tauri.conf.json",
       version: JSON.parse(read("src-tauri/tauri.conf.json")).version,
     },
@@ -104,8 +148,10 @@ function main() {
 
   const failures = [];
 
-  const distinct = new Set(sources.map((s) => s.version));
-  if (distinct.size !== 1) {
+  const unreadable = sources.filter((source) => !source.version);
+  if (unreadable.length > 0) {
+    failures.push(`读不到版本号：${unreadable.map((source) => source.path).join("、")}`);
+  } else if (new Set(sources.map((source) => source.version)).size !== 1) {
     failures.push("三处版本号不一致：");
     for (const source of sources) {
       failures.push(`  ${source.version.padEnd(12)} ${source.path}`);
@@ -118,6 +164,7 @@ function main() {
   }
 
   failures.push(...checkInheritance());
+  failures.push(...checkLockfile(version));
 
   if (failures.length > 0) {
     console.error("版本校验失败：");

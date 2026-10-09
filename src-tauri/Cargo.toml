@@ -1,6 +1,6 @@
 [package]
 name = "repo-prism"
-version = "0.1.0"
+version.workspace = true
 description = "RepoPrism — read-only repo intelligence"
 authors = ["RepoPrism Contributors"]
 edition = "2021"

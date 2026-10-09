@@ -64,6 +64,7 @@
 | [P-03](TASKS/patch/P-03-deps-ci-hygiene.md) | 依赖与 CI 卫生（pnpm / build / 性能门禁） | ✅ |
 | [P-04](TASKS/patch/P-04-docs-consistency.md) | SPEC 补全 + SECURITY 对齐 | ⚠️ 已被取代 |
 | [P-05](TASKS/patch/P-05-guard-scope-and-write-verbs.md) | 只读扫描器补调用门槛与写动词黑名单 | ✅ |
+| [P-06](TASKS/patch/P-06-version-gate-gap.md) | 版本闸门补两个洞（成员继承 + Cargo.lock） | ✅ |
 
 ---
 
@@ -83,7 +84,7 @@
 | 前端构建 | `vite build` | ✅ `dist/assets/index-qz-52nYw.js` 244.43 kB（gzip 76.49 kB） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.1.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
-| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ⚠️ 见下：2026-10-07 起 5 次全红，2026-10-09 已定位并修复 |
+| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ⚠️ 2026-10-07 起 5 次全红；2026-10-09 定位并修复（`ci.yml` 补 Tauri Linux 系统依赖 + 关 `fail-fast`），修复后的运行结果以 Actions 为准 |
 
 **core 87 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
 diff 10 / perf 1 / remote 5 / snapshot 16。

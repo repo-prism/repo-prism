@@ -20,8 +20,7 @@
 | `Cargo.toml` | `[workspace.package] version` |
 | `src-tauri/tauri.conf.json` | `version` |
 
-各 crate 自己的 `Cargo.toml` 写的是 `version.workspace = true`，自动继承，**不要**改成硬编码
-（`scripts/check-versions.mjs` 会拦下来）。
+各 crate 自己的 `Cargo.toml` 写的是 `version.workspace = true`，自动继承，**不要**改成硬编码。
 
 改完先校验一遍：
 
@@ -30,7 +29,17 @@ pnpm release:dry
 # 期望输出：next version: 0.2.0
 ```
 
-不一致时会逐行列出三处各自的值并以退出码 1 失败。
+`scripts/check-versions.mjs` 一共查五件事，任何一条不过就以退出码 1 失败并逐条列出原因：
+
+| # | 检查 | 为什么 |
+|---|------|--------|
+| 1 | `package.json` / workspace `Cargo.toml` / `tauri.conf.json` 三处一致 | 三处都能被单独改 |
+| 2 | 每个 workspace 成员是**继承**版本而非硬编码 | v0.2.0 出过：`src-tauri/Cargo.toml` 硬编码 `0.1.0`，只有它没跟着走（P-06） |
+| 3 | **`Cargo.lock` 里各成员版本与当前版本号一致** | 漏提交锁文件时 CI 会顺手改掉它（CI 不带 `--locked`）而**显示绿**，只有 `release.yml` 的 `--locked` 构建会炸 —— 即打 tag 那一刻（P-06） |
+| 4 | `--expect` / `--expect-ref` 指定的版本号相符 | tag 与版本号对不上是最常见的发版事故 |
+| 5 | 成员清单来自根 `Cargo.toml` 的 `[workspace] members` | 不再依赖目录结构假设 |
+
+改了版本号但**忘了 `Cargo.lock`** 时，第 3 条会拦住你 —— 这是 v0.2.0 的真实教训。
 
 ## 2. 更新 CHANGELOG
 
@@ -40,13 +49,17 @@ pnpm release:dry
 ## 3. 提交并打 tag
 
 ```bash
-git add package.json Cargo.toml src-tauri/tauri.conf.json CHANGELOG.md
+git add package.json Cargo.toml Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md
 git commit -m "chore(release): v0.2.0"
 git push origin main
 
-git tag v0.2.0          # 必须是 vX.Y.Z，release workflow 只认这个形状
+git tag -a v0.2.0 -m "RepoPrism v0.2.0"   # 必须是 vX.Y.Z，release workflow 只认这个形状
 git push origin v0.2.0
 ```
+
+> **`Cargo.lock` 必须在改动清单里**：提版本号会让锁文件里四个成员的版本一起变，
+> 而 `release.yml` 用 `--locked` 构建 CLI / MCP，锁文件过期会直接失败。
+> `pnpm release:dry` 现在会检查这一点（P-06）。
 
 > tag 必须带 `v` 前缀。`release.yml` 里 `--expect-ref` 会自动剥掉 `v` 再比对
 > `package.json` 的 `0.2.0`。
@@ -116,6 +129,6 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 | 缺口 | 影响 |
 |------|------|
 | 无代码签名 | 用户安装时看到系统警告 |
-| `release.yml` 的首次运行就是 v0.2.0 | 本机无 Actions 环境，三个 job 是否全绿只能看 GitHub Actions 页面 |
+| `release.yml` 的首次运行就是 v0.2.0 | 本机无 Actions 环境，四个 job（verify / desktop / cli / mcp-binaries）是否全绿只能看 GitHub Actions 页面 |
 | 无自动更新（updater） | 用户需手动下载新版本 |
 | `productName` 仍是 `repoprism-app` | 安装包与窗口标题显示的是这个旧名，与产品名 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，一直没擅自改 |
