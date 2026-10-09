@@ -11,4 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 repo-prism-core = { path = "../repo-prism-core" }
+serde.workspace = true
+serde_json.workspace = true
 anyhow.workspace = true
