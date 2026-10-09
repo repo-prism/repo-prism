@@ -53,19 +53,24 @@ git push origin v0.2.0
 
 ## 4. CI 自动构建
 
-`.github/workflows/release.yml` 由 tag 触发，分三个阶段：
+`.github/workflows/release.yml` 由 tag 触发，分四个阶段：
 
 1. **verify** —— 校验 tag 与三处版本号一致，并跑一次只读扫描（自检 + 真实扫描）
 2. **desktop**（needs: verify）—— `tauri-apps/tauri-action` 在 ubuntu / macos / windows
-   三平台打包，并把安装包挂到 draft release
+   三平台打包，并把安装包挂到 draft release；**draft release 由这一步创建**
 3. **cli**（needs: verify, desktop）—— 用 `softprops/action-gh-release` 挂四个 CLI 二进制：
    - `repoprism-linux-x86_64`
    - `repoprism-macos-aarch64`
    - `repoprism-macos-x86_64`
    - `repoprism-windows-x86_64.exe`
+4. **mcp-binaries**（needs: verify, desktop）—— 同样四个目标的 MCP Server 二进制
+   `repoprism-mcp-<平台>-<架构>[.exe]`
 
-`cli` 排在 `desktop` 之后不是偶然：draft release 由 `tauri-action` 创建，
-两个 job 同时抢建同一个 release 会撞 422。
+`cli` 与 `mcp-binaries` 都排在 `desktop` 之后不是偶然：draft release 由 `tauri-action`
+创建，两个 job 同时抢建同一个 release 会撞 422。这两个 job 之间可以并列 ——
+它们只是往已存在的 release 追加文件，上传互不冲突。
+
+产物共 **11 个文件**：3 桌面安装包 + 4 CLI + 4 MCP。
 
 ## 5. 人工验收（必做）
 
@@ -73,7 +78,9 @@ git push origin v0.2.0
 
 1. 下载三个平台的桌面安装包，各装一遍，打开仓库看四个视图是否正常
 2. 下载至少一个 CLI 二进制，`repoprism inspect . --json` 与 `repoprism skill --print` 各跑一次
-3. 确认 Release 说明与 `CHANGELOG.md` 一致
+3. 下载一个 MCP 二进制，`echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ./repoprism-mcp`
+   应列出 **5 个**工具名
+4. 确认 Release 说明与 `CHANGELOG.md` 一致
 
 **未签名提示**：当前不做代码签名（缺 Apple Developer 证书与 Windows 代码签名证书），
 macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。这是已知情况，
@@ -95,10 +102,20 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 **文档版本与产品版本无关**：`SPEC.md` 顶部的文档版本号不随产品版本变化，
 它只标记规格本身的修订（见 `SPEC.md` 开头说明）。
 
+## 发布历史
+
+| 版本 | 日期 | tag | 内容 |
+|------|------|-----|------|
+| 0.2.0 | 2026-10-09 | `v0.2.0` | 首次实际发布：`004` + `005` 批次（变更分析、外部集成、发布硬化、本地 AI 摘要层、MCP 扩展、虚拟滚动） |
+| 0.1.0 | — | — | **从未发布**：`CHANGELOG.md` 保留了这一段的开发记录，但没有打过 tag，也没有产出过安装包 |
+
+> 首个可下载版本是 v0.2.0。0.1.0 的条目仅作历史记录，不要用它去对 Release 页面。
+
 ## 已知缺口
 
 | 缺口 | 影响 |
 |------|------|
 | 无代码签名 | 用户安装时看到系统警告 |
-| release workflow 未实机跑过 | 首次发布需人工盯一遍 Actions 日志 |
+| `release.yml` 的首次运行就是 v0.2.0 | 本机无 Actions 环境，三个 job 是否全绿只能看 GitHub Actions 页面 |
 | 无自动更新（updater） | 用户需手动下载新版本 |
+| `productName` 仍是 `repoprism-app` | 安装包与窗口标题显示的是这个旧名，与产品名 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，一直没擅自改 |

@@ -58,6 +58,28 @@ pnpm tauri dev
 MCP Server 见 [`crates/repo-prism-mcp/README.md`](crates/repo-prism-mcp/README.md)，
 Agent 使用说明见 [`skill/SKILL.md`](skill/SKILL.md)。
 
+MCP 暴露 5 个只读工具：
+
+| 工具 | 说明 |
+|------|------|
+| `repoprism_inspect(path)` | 仓库快照（HEAD / 分支 / 标签 / 变更分组） |
+| `repoprism_commits(path, limit, skip)` | 提交历史（`limit` 上限 2000） |
+| `repoprism_detail(path, sha)` | 提交详情与原始 diff |
+| `repoprism_analyze(path)` | 未提交改动的本地风险分析 |
+| `repoprism_remote(path)` | `origin` 的 host / owner / repo（无 remote 返回 `null`） |
+
+## 本地 AI（可选）
+
+默认**关闭**。启用后 RepoPrism 会用你本机的模型服务生成变更摘要与提交摘要：
+
+```bash
+ollama serve
+ollama pull llama3.2
+```
+
+然后在桌面应用右上角设置（⚙）里填入 endpoint 与模型名，点「测试连接」确认可达。
+未启用时所有 AI 按钮置灰，其余功能不受影响。
+
 ## 开发
 
 ```bash
@@ -84,10 +106,12 @@ pnpm release:dry
 ## 发布
 
 打 `v*.*.*` tag 会触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，
-产出三平台桌面安装包与四目标 CLI 二进制，**全部是 draft release**，需人工确认后发布。
+产出 11 个文件：三平台桌面安装包 + 四目标 CLI 二进制 + 四目标 MCP 二进制
+（`repoprism-*` / `repoprism-mcp-*`），**全部是 draft release**，需人工确认后发布。
 当前**不做代码签名**（macOS 未公证、Windows 未签名），安装时会有系统警告 —— 这是已知情况。
 
-完整流程见 [`docs/RELEASE.md`](docs/RELEASE.md)，版本历史见 [`CHANGELOG.md`](CHANGELOG.md)。
+当前版本 **0.2.0**，发布历史见 [`docs/RELEASE.md`](docs/RELEASE.md)，
+版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 文档地图
 

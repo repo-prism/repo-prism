@@ -6,7 +6,10 @@
 
 ## [Unreleased]
 
-计划作为 **v0.2.0** 发布（`006` 批次负责提版本号、打 tag）。以下为 `004` + `005` 批次的内容。
+## [0.2.0] - 2026-10-09
+
+`004` + `005` 两个批次的内容。**这是本仓库的首次实际发布**：`0.1.0` 的记录保留在下方，
+但它从未打过 tag，也没有产出过任何安装包——第一个可下载的版本是 v0.2.0。
 
 ### Added
 
@@ -21,14 +24,26 @@
 - **AI 设置面板**：endpoint / model / 启用开关 + 测试连接（只测不存）
 - **MCP 工具扩展**：新增 `repoprism_analyze` 与 `repoprism_remote`，工具数 3 → 5
 - **提交列表虚拟滚动**：行高 48px、overscan 8；300 条提交下渲染行数 < 80
-- **`repoprism analyze` 走带行数统计的规则路径**：桌面端与 MCP 的
+- **`repoprism_analyze` 走带行数统计的规则路径**：桌面端与 MCP 的
   `mass-deletion` 规则现在真正生效（此前 `from_status` 不带行数，该规则恒不命中）
+- **发布产物新增 MCP 二进制**：`release.yml` 增补 `mcp-binaries` job，
+  与 CLI 一样出四个目标的 `repoprism-mcp-*`（此前只发桌面安装包与 CLI）
 
 ### Changed
 
 - `analyze_changes` 在行数统计失败时**降级为纯路径规则**，而不是让整个分析报错
 - `ureq` 关闭默认特性（不带 TLS）：回环地址上的 https 无实际用途，
   关掉可整棵移除 `rustls` / `ring` / `webpki` 依赖树
+- **`ci.yml` 的 rust job 在 ubuntu 上补装 Tauri Linux 系统依赖**
+  （WebKitGTK / GTK / libsoup 等），并显式 `fail-fast: false`
+
+### Fixed
+
+- **CI 在 ubuntu 上一直是红的**（2026-10-07 起 5 次运行全部失败，含 `004` / `005` 两批）。
+  失败点是 ubuntu leg 的 `cargo clippy --workspace`（exit 101）：它会连 `src-tauri`
+  一起检查，而该 job 从未安装 Linux 系统库。macOS / Windows 的系统 SDK 自带等价物，
+  所以只有 ubuntu 红；又因矩阵默认 `fail-fast`，一个腿红掐掉另两个腿，
+  日志里只剩 `cancelled`，把问题掩盖了 5 次运行。详见 `ROADMAP.md` 的风险清单
 
 ### Security
 
@@ -42,8 +57,9 @@
 - **本地 AI 层没有端到端验证**：校验与 prompt 构造有 13 个单测，
   但本机未安装 Ollama，**一次真实的模型调用都没有发生过**（HTTP 路径未经运行验证）
 - 虚拟滚动的区间计算有断言覆盖，但真实滚动帧率未测量（需 GUI）
-- 其余同 v0.1.0：未签名、release workflow 未在 GitHub 上跑过、
-  UI 接线无自动化测试、MCP 未与真实客户端联调
+- 其余同 v0.1.0：未签名、UI 接线无自动化测试、MCP 未与真实客户端联调
+- **`release.yml` 的第一次实机运行就是 v0.2.0 这次**：本机没有可用的 Actions 环境，
+  三个 job 是否全绿只能看 GitHub Actions 页面。产物是 draft，人工验收前不会对外可见
 
 ## [0.1.0] - 2026-10-09
 

@@ -5,8 +5,10 @@ name: Release
 # 产物一律是 **draft release**：本仓库不做代码签名（缺 Apple Developer 证书与
 # Windows 代码签名证书），因此必须人工过一遍再点发布。详见 docs/RELEASE.md。
 #
+# 产物清单（共 11 个文件）：3 个平台桌面安装包 + 4 个 CLI 二进制 + 4 个 MCP 二进制。
+#
 # ⚠️ 本工作流**尚未在 GitHub 上实际执行过** —— 本机没有可用的 Actions 环境。
-#    首次发布请把 draft release 里的四个平台产物都下载装一遍再发布。
+#    v0.2.0 的 tag 是它的第一次运行，请人工盯一遍日志。
 on:
   push:
     tags: ["v*.*.*"]
@@ -68,14 +70,21 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Tauri 2 在 Linux 上的构建依赖。注意是 libayatana-appindicator3-dev
-      # 而不是旧的 libappindicator3-dev —— Ubuntu 22.04 起只发前者。
+      # Tauri 2 在 Linux 上的构建依赖，与 ci.yml 的 rust job 用同一份清单。
+      # 注意是 libayatana-appindicator3-dev 而不是旧的 libappindicator3-dev ——
+      # Ubuntu 22.04 起只发前者。
       - name: Install Linux Tauri dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
@@ -91,8 +100,9 @@ jobs:
             只读仓库智能工具。**未签名的 draft 版本**，安装前请留意系统签名警告。
 
             - 桌面安装包：macOS / Windows / Linux
-            - CLI 二进制：见下方附件（`repoprism-<平台>-<架构>`）
-            - Agent 接入：`repoprism skill --print` 取 SKILL.md；MCP Server 见仓库 README
+            - CLI 二进制：`repoprism-<平台>-<架构>`
+            - MCP 二进制：`repoprism-mcp-<平台>-<架构>`
+            - Agent 接入：`repoprism skill --print` 取 SKILL.md；MCP 配置见仓库 README
           releaseDraft: true
           prerelease: false
 
@@ -134,6 +144,52 @@ jobs:
         run: |
           set -euo pipefail
           src="target/${{ matrix.target }}/release/repoprism"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            src="${src}.exe"
+          fi
+          cp "$src" "${{ matrix.name }}"
+      - name: Attach to the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: ${{ matrix.name }}
+
+  mcp-binaries:
+    name: MCP binary (${{ matrix.name }})
+    # 与 cli 同因：draft release 由 tauri-action 创建，必须等它跑完。
+    # 与 cli 并列而非串行 —— 两者都只是往已存在的 release 追加附件，上传互不冲突。
+    needs: [verify, desktop]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: repoprism-mcp-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: repoprism-mcp-macos-aarch64
+          # 与 cli 同一策略：Intel 切片在 arm64 runner 上交叉编译，不依赖 macos-13
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: repoprism-mcp-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: repoprism-mcp-windows-x86_64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p repo-prism-mcp --target ${{ matrix.target }}
+      - name: Stage the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="target/${{ matrix.target }}/release/repoprism-mcp"
           if [ "${RUNNER_OS}" = "Windows" ]; then
             src="${src}.exe"
           fi

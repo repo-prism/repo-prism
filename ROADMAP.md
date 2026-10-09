@@ -22,6 +22,9 @@
 只由产品能力占用。工程补丁（安全加固、依赖卫生、文档对齐等不新增产品能力的事）
 走 `TASKS/patch/P-0N` 序列。
 
+**发布批次不占卡号**：`006` 是发布批次（提版本号 + 打 tag），不新增产品能力，
+因此没有 `TASK-0xx` 卡片，只记在 `docs/RELEASE.md` 的发布历史与 `CHANGELOG.md` 的版本条目里。
+
 > **为什么有这条规则**：2026-10-09 出过一次真实事故——一轮自发的工程整改把补丁卡
 > 编成了 `TASK-008`…`TASK-011`，而血统里 008 = CLI 规范化 + Skill 打包、009 = MCP Server、
 > 010 = 变更分析、011 = 外部集成，四个号全被占掉，导致「TASK-008 是什么」有两个
@@ -49,7 +52,7 @@
 | `005` | [TASK-014](TASKS/014-commit-ai.md) | 提交级 AI 分析 | ✅ |
 | `005` | [TASK-015](TASKS/015-mcp-extension.md) | MCP 工具扩展（3 → 5） | ✅ |
 | `005` | [TASK-016](TASKS/016-virtual-scroll.md) | 前端虚拟滚动 | ✅ |
-| `006` | — | 发布 v0.2.0 | ⬜ 未开始 |
+| `006` | — | 发布 v0.2.0（tag `v0.2.0`） | ✅ 2026-10-09 |
 | `005` 预告 | TASK-017–020 | `gix` 后端 / 增量缓存 / 多仓库 / PR 只读视图（v0.3） | ⬜ 未开始 |
 
 ### 已知偏差（在 TASK-003 批次前后补做的工程补丁）
@@ -80,6 +83,7 @@
 | 前端构建 | `vite build` | ✅ `dist/assets/index-qz-52nYw.js` 244.43 kB（gzip 76.49 kB） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.1.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
+| 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ⚠️ 见下：2026-10-07 起 5 次全红，2026-10-09 已定位并修复 |
 
 **core 87 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
 diff 10 / perf 1 / remote 5 / snapshot 16。
@@ -114,23 +118,32 @@ CI runner 无此问题，故未改项目配置。
 
 ## 六、下一步
 
-`005` 批次已完成，`004` + `005` 合起来构成 v0.2 的产品能力面。按原规划下一步是 `006`：
+`006` 已执行：三处版本号提到 `0.2.0`、`CHANGELOG.md` 定版、`release.yml` 增补 MCP 二进制 job，
+tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一个真正可下载的版本。
 
-1. **`006` 发布 v0.2.0** —— 走 `docs/RELEASE.md`：
-   - 先把三处版本号从 `0.1.0` 提到 `0.2.0`（`pnpm release:dry` 会校验一致性）
-   - 更新 `CHANGELOG.md` 的 v0.2.0 段
-   - 打 `v0.2.0` tag，让 `release.yml` 产出 draft release 并人工验收
-   - **前置**：`release.yml` 至今没在 GitHub 上真跑过，首发必须人工盯
-2. 之后进 v0.3（`005` 文档的预告）：TASK-017 `gix` 后端 / TASK-018 增量缓存 /
-   TASK-019 多仓库 / TASK-020 PR 只读视图
+接下来按原规划进 v0.3（`005` 文档的预告）：
 
-### 独立待办（不属 `005`，需先决条件）
+1. **TASK-017 `gix` 后端** —— 目标是大仓库首屏 < 1s；当前走系统 Git 子进程（`ADR/001`），
+   换后端属于重大架构变更，需要先立 ADR-002 说清「为什么值得放弃系统 Git」
+2. **TASK-018 增量缓存** —— 提交图分页与 diff 结果的本地缓存
+3. **TASK-019 多仓库工作区**（US-9）
+4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界
+
+### 发布收尾（v0.2.0 之后立刻要做）
+
+| 事项 | 说明 |
+|------|------|
+| 盯 `release.yml` 首次运行 | 四个 job（verify / desktop / cli / mcp-binaries）应产出 11 个附件；本机无法观测 |
+| 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5 |
+| 点发布 | draft 不会自动对外可见 |
+
+### 独立待办（需先决条件）
 
 | 事项 | 阻塞原因 |
 |------|---------|
 | 代码签名与 macOS 公证 | 缺 Apple Developer 证书与 Windows 代码签名证书 |
 | 本地 AI 端到端验证 | 本机未安装 Ollama；需 `ollama serve` + 拉一个模型，或写一个返回固定 JSON 的本地 stub |
-| 产品命名统一 | `src-tauri/tauri.conf.json` 的 `productName` 仍是 `repoprism-app`，与 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，未擅自改 |
+| 产品命名统一 | `src-tauri/tauri.conf.json` 的 `productName` 仍是 `repoprism-app`，与 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，未擅自改。**v0.2.0 的安装包与窗口标题用的就是这个名字** |
 | 图片 / 字节预览 | 需先定「只读取 blob 字节」的边界（`git cat-file`），并给 diff 定性能阈值 |
 | `commit-graph` 虚拟化的布局耦合 | 虚拟滚动依赖 `.main` / `.main-split` / `.commit-graph` 上的 `min-height: 0`；改这几处布局必须回归虚拟滚动 |
 
@@ -145,8 +158,19 @@ CI runner 无此问题，故未改项目配置。
   纯逻辑（graph / diff / risk / integrations / kinds / format / virtual）都有测试，
   但「点提交 → 出 Diff」「点按钮 → 开浏览器」「滚动列表」需人工 `pnpm tauri dev` 确认。
   TASK-016 把虚拟滚动的**区间计算**变成了可断言的形式，但真实滚动帧率仍未被测。
-- **CI 尚未验证**：全部门禁都是本机跑通的；`ci.yml` 与 `release.yml` 都还没在 GitHub 上执行过。
-  `release.yml` 尤其需要人工盯首次运行。
+- **CI 一直在跑，而且一直是红的**（2026-10-09 发现并修复）：本文件此前写的「CI 尚未验证」
+  是**错的**。仓库是公开的，`ci.yml` 在每次 push 到 `main` 时都真实执行 —— 2026-10-07 起的
+  5 次运行**全部失败**，包括 `004` 与 `005` 两批。
+  失败点始终只有一处：**ubuntu leg 的 clippy（exit 101）**。原因不是代码，而是
+  `cargo clippy --workspace` 会连 `src-tauri` 一起检查，而 rust job 从未安装
+  WebKitGTK / GTK / libsoup 这些 **Linux 系统库**（只有 `release.yml` 的 desktop job 装了）。
+  macOS 与 Windows 的系统 SDK 自带等价物，所以那两个平台是绿的。
+  又因为矩阵默认 `fail-fast: true`，ubuntu 一红就把另外两个腿掐掉，日志里只剩 `cancelled`
+  —— 把「只有一个平台红」这件事掩盖了整整 5 次运行。
+  修复：`ci.yml` 的 rust job 在 ubuntu 上补装 Tauri Linux 依赖，并显式关掉 `fail-fast`。
+  教训：**门禁红过就是红过，不能因为本机绿就写「尚未验证」。**
+- **`release.yml` 仍未实机跑过**：它是 tag 触发的，而历史上没有任何 tag，
+  所以 v0.2.0 是它的首跑，必须人工盯。
 - **MCP 未与真实客户端联调**：协议行为由 14 个真实子进程测试覆盖，
   但尚未在 Claude Desktop / Cursor 中实机连接过。
 - **发布产物未签名**：安装时会有系统警告，见 `CHANGELOG.md` 的 Known limitations。
