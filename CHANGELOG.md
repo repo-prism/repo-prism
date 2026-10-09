@@ -6,6 +6,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- **本地模型 HTTP 路径的真实覆盖**（工程补丁 P-07，
+  `crates/repo-prism-core/tests/summarizer_http.rs`）
+  - 用 `std::net::TcpListener` 在 127.0.0.1 上起 stub（**不引新依赖**），
+    让 `list_models` / `generate` / `summarize` 真实走一遍 TCP → HTTP 解析 → JSON 取值
+  - 覆盖四条降级路径：端口无人监听 / 5xx / 非法 JSON / 空白或缺失的 `response`
+  - 断言请求的方法、路径、`Content-Type`，并把请求体反序列化后逐字段核对
+    （`model` / `stream: false` / `prompt` / `options.temperature`）
+  - 「出网 body 只含相对路径」这条不变式改由**读请求体**直接断言
+
+### Fixed
+
+- `summarizer.rs` 中真正发送请求的两处 `ureq` 调用此前**一次都没被执行过**
+  （本机没有 Ollama），而 `SPEC.md` / `SECURITY.md` 把「不把代码送到外部」
+  声明为**只由测试兜底**——那条防线是空的。
+  这类失效的症状是「AI 摘要静默返回 `None`」：界面上只会少一块内容，没有报错，
+  因此可以长期潜伏。现已由上述集成测试覆盖。
+- 测试本身也验证过**会失败**：用 5 个探针逐个破坏被测逻辑
+  （尾斜杠拼接 / 取值字段名 / 空响应过滤 / 出网 body 注入绝对路径 / 报错文案），
+  每一步都有对应用例变红。
+
 ## [0.2.0] - 2026-10-09
 
 `004` + `005` 两个批次的内容。**这是本仓库的首次实际发布**：`0.1.0` 的记录保留在下方，

@@ -25,3 +25,4 @@
 | [P-04](P-04-docs-consistency.md) | SPEC 补全 + SECURITY 对齐 | ⚠️ 已被取代（其 US 编号偏差由 TASK-008/009 同轮修正） |
 | [P-05](P-05-guard-scope-and-write-verbs.md) | 只读扫描器补调用门槛与写动词黑名单 | ✅ 完成 |
 | [P-06](P-06-version-gate-gap.md) | 版本闸门补两个洞（成员继承 + Cargo.lock） | ✅ 完成 |
+| [P-07](P-07-http-path-coverage.md) | 本地模型 HTTP 路径用回环 stub 变实（原防线从未运行过） | ✅ 完成 |

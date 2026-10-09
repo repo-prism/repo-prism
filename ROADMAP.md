@@ -65,6 +65,7 @@
 | [P-04](TASKS/patch/P-04-docs-consistency.md) | SPEC 补全 + SECURITY 对齐 | ⚠️ 已被取代 |
 | [P-05](TASKS/patch/P-05-guard-scope-and-write-verbs.md) | 只读扫描器补调用门槛与写动词黑名单 | ✅ |
 | [P-06](TASKS/patch/P-06-version-gate-gap.md) | 版本闸门补两个洞（成员继承 + Cargo.lock） | ✅ |
+| [P-07](TASKS/patch/P-07-http-path-coverage.md) | 本地模型 HTTP 路径用回环 stub 变实（原防线从未运行过） | ✅ 2026-10-09 |
 
 ---
 
@@ -76,21 +77,26 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **115 passed**（core 87 / CLI 14 / MCP 14） |
+| Rust 测试 | `cargo test --workspace` | ✅ **123 passed**（core 95 / CLI 14 / MCP 14） |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 27 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
 | 前端测试 | `vitest run` | ✅ 41 passed（5 files） |
 | 前端构建 | `vite build` | ✅ `dist/assets/index-qz-52nYw.js` 244.43 kB（gzip 76.49 kB） |
-| 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.1.0` |
+| 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.2.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ 修复后两次全绿：`99478ea` → run 37912380547、`278ceb9` → run 37913817616。修复前（2026-10-07 19:33 起）**当时存在的 5 次运行全部失败** |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
-**core 87 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
-diff 10 / perf 1 / remote 5 / snapshot 16。
+**core 95 项的构成**：lib 50（含 `summarizer` 13、`analysis` 16、`git`/`diffparse` 等）/ analysis 5 /
+diff 10 / perf 1 / remote 5 / snapshot 16 / **`summarizer_http` 8（P-07 新增）**。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
+
+**`summarizer_http` 补的是什么**：`summarizer.rs` 那 13 个单测是纯函数，
+而真正把字节送出进程的两处 `ureq` 调用在 P-07 之前**一次都没执行过**（本机无 Ollama）。
+现在用 `std::net::TcpListener` 在 127.0.0.1 起 stub 跑通往返，并把「出网 body 只含相对路径」
+钉成断言。**它不替代真实模型验证**——见下方「未解决的风险」。
 单次采样会把调度抖动算成代码性能——同一份代码实测出现过 208ms / 470ms / 576ms
 （576ms 那次直接超预算、测试变红）。绝对值随机器负载浮动，**只应看是否超预算**，
 不要跨机器比较。（上表 224ms 是负载较轻时的实测值；同一批代码在重负载下测到过 244ms。）
@@ -123,6 +129,10 @@ CI runner 无此问题，故未改项目配置。
 `006` 已执行：三处版本号提到 `0.2.0`、`CHANGELOG.md` 定版、`release.yml` 增补 MCP 二进制 job，
 tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一个真正可下载的版本。
 
+随后补了 [P-07](TASKS/patch/P-07-http-path-coverage.md)：本地模型的 HTTP 路径在
+`SPEC`/`SECURITY` 里被声明为「只由测试兜底」，而那条测试**从未运行过那两行代码**。
+现在用回环 stub 把它跑通并钉住出网 body 的内容。
+
 接下来按原规划进 v0.3（`005` 文档的预告）：
 
 1. **TASK-017 `gix` 后端** —— 目标是大仓库首屏 < 1s；当前走系统 Git 子进程（`ADR/001`），
@@ -145,18 +155,24 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
 | 事项 | 阻塞原因 |
 |------|---------|
 | 代码签名与 macOS 公证 | 缺 Apple Developer 证书与 Windows 代码签名证书 |
-| 本地 AI 端到端验证 | 本机未安装 Ollama；需 `ollama serve` + 拉一个模型，或写一个返回固定 JSON 的本地 stub |
+| 本地 AI 端到端验证 | 本机未安装 Ollama；需 `ollama serve` + 拉一个模型。**我们这一侧的 HTTP 路径已由 P-07 的 stub 覆盖**，剩下的是「真实 Ollama 的响应形状与我们的假设一致」这半 |
 | 产品命名统一 | `src-tauri/tauri.conf.json` 的 `productName` 仍是 `repoprism-app`，与 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，未擅自改。**v0.2.0 的安装包与窗口标题用的就是这个名字** |
 | 图片 / 字节预览 | 需先定「只读取 blob 字节」的边界（`git cat-file`），并给 diff 定性能阈值 |
 | `commit-graph` 虚拟化的布局耦合 | 虚拟滚动依赖 `.main` / `.main-split` / `.commit-graph` 上的 `min-height: 0`；改这几处布局必须回归虚拟滚动 |
 
 ### 未解决的风险（如实说明）
 
-- **本地 AI 层没有端到端验证**：校验逻辑与 prompt 构造有 13 个单测，
-  但**没有一次真实的模型调用**（本机无 Ollama）。HTTP 路径完全未经运行验证。
+- **本地 AI 层仍没有真实模型验证**：P-07 已让**我们这一侧**的 HTTP 路径真实跑起来
+  （`tests/summarizer_http.rs`，回环 stub 往返 + 出网 body 内容断言 + 四条降级路径），
+  但 **stub 的响应形状是我们自己写的** —— 它证明不了真实 Ollama 的字段名、
+  `stream: false` 的行为、错误码与我们的假设一致。真实调用的端到端验证
+  在 SPEC US-7 里**仍是 `[待实现]`**（本机无 Ollama）。
 - **出网闸门不归 CI 静态扫描管**：`read-only-guard.sh` 是 Git 动词白名单，
-  看不见 `ureq` 调用。`OllamaConfig::validate` 的单元测试是这条边界的唯一防线——
-  改 `summarizer.rs` 时若不跑那 13 个测试，闸门失效不会有任何提示。
+  看不见 `ureq` 调用。这条边界现在有两层测试兜底：
+  `OllamaConfig::validate` 的单测（8 条「像 localhost」的输入）+ P-07 的
+  `the_bytes_that_leave_the_machine_carry_relative_paths_only`（直接读请求体）。
+  两层都不在扫描器里 —— **改动 `summarizer.rs` 若不跑 `summarizer` 与 `summarizer_http`
+  两组测试，闸门失效不会有任何提示。**
 - **UI 接线没有自动化测试**：`App ↔ invoke` 一层需要 Tauri 运行时，单测覆盖不到；
   纯逻辑（graph / diff / risk / integrations / kinds / format / virtual）都有测试，
   但「点提交 → 出 Diff」「点按钮 → 开浏览器」「滚动列表」需人工 `pnpm tauri dev` 确认。

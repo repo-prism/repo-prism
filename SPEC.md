@@ -142,7 +142,13 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 - 超时 60s；失败降级为 `None`，不把「模型没启动」升级为错误
 - 设置持久化到用户配置目录；读取失败回默认值（关闭）
 
-`[待实现]` 真实模型调用的端到端验证（需本机安装 Ollama）
+`[已实现]` 回环 stub 上的 HTTP 往返（工程补丁 P-07，`tests/summarizer_http.rs`）：
+用 `std::net::TcpListener` 在 127.0.0.1 起 stub，真实跑通 `list_models` / `generate` / `summarize`，
+并覆盖连不上 / 5xx / 非法 JSON / 空白 response 四条降级路径。
+「出网 body 只含相对路径」这条不变式由**读请求体**直接断言，不再只靠代码审查。
+
+`[待实现]` **真实**模型调用的端到端验证（需本机安装 Ollama）：
+stub 的响应形状是我们自己写的，证明不了真实 Ollama 的字段名与行为与假设一致。
 
 `[已实现]` 提交级 AI 分析：提交详情面板提供「AI 分析此提交」按钮，复用同一摘要器。
 切换提交必须清空上一条摘要（由 `key={sha}` 重挂载保证）。
@@ -186,8 +192,11 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 - 依赖侧同步收窄：`ureq` 关闭默认特性（不带 TLS），避免为一个用不上的
   `https://localhost` 引入整棵 `rustls` / `ring` / `webpki` 依赖树
 - **只读扫描器不覆盖出网**：它是字面量级 Git 动词白名单，看不见 HTTP 调用。
-  这条边界靠 `OllamaConfig::validate` 的单元测试守住（`rejects_hosts_that_only_look_local`
-  用 8 条输入钉住前缀判定会放行的写法）。这是本规格里**唯一靠测试而非静态扫描兜底**的安全约束。
+  这条边界靠两层测试守住：`OllamaConfig::validate` 的单测（`rejects_hosts_that_only_look_local`
+  用 8 条输入钉住前缀判定会放行的写法）+ P-07 的 `summarizer_http` 集成测试
+  （回环 stub 真实往返，并读请求体断言只送了相对路径）。
+  这是本规格里**唯一靠测试而非静态扫描兜底**的安全约束 ——
+  **因此这两组测试必须会失败**：P-07 用 5 个探针逐个破坏被测逻辑验证过它们真的会红。
 
 ### 只读安全
 

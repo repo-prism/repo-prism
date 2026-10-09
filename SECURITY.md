@@ -60,8 +60,14 @@ CI 扫描器把 `--textconv` / `--filters` 列入**危险选项黑名单**：真
    diff 正文与文件内容。
 
 **必须知道的边界**：CI 的只读扫描器**看不见 HTTP 调用**（它是 Git 动词白名单）。
-本条约束**只由单元测试兜底**，不是静态扫描兜底 —— 改动 `summarizer.rs`
-的校验逻辑时，`cargo test -p repo-prism-core --lib summarizer` 是唯一的防线。
+本条约束**只由测试兜底**，不是静态扫描兜底。两层：
+`cargo test -p repo-prism-core --lib summarizer`（校验逻辑）与
+`cargo test -p repo-prism-core --test summarizer_http`（P-07：回环 stub 真实往返 +
+读请求体断言只送相对路径）。改动 `summarizer.rs` 的校验或请求构造时，这两条都要跑。
+
+> P-07 之前，第 3 层（「只送最小内容」）**只有代码审查，没有测试** ——
+> 那两处 `ureq` 调用从未被执行过。第 3 层现在由
+> `the_bytes_that_leave_the_machine_carry_relative_paths_only` 直接断言请求体。
 
 `set_ai_settings` 的顺序也是这条边界的一部分：**先校验、再落盘、再入内存**。
 先存后校验等于允许用户绕开唯一那道闸门。
