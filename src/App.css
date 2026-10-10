@@ -322,6 +322,104 @@ body,
   font-size: 10px;
   color: var(--muted);
 }
+
+/* blob 预览（US-3，补丁 P-10） */
+.file-open {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.file-open:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.preview-card {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elev);
+}
+.preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.preview-header h3 {
+  margin: 0;
+  font-size: 12px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.preview-note {
+  font-size: 11px;
+  color: var(--muted);
+}
+.preview-note.error {
+  color: var(--danger);
+}
+.preview-notice {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--warning);
+  font-size: 11px;
+  color: var(--muted);
+}
+.preview-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.preview-figure {
+  margin: 0;
+  min-width: 0;
+}
+.preview-figure figcaption {
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.preview-figure img {
+  max-width: 100%;
+  max-height: 320px;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: repeating-conic-gradient(#1f2735 0% 25%, #182031 0% 50%) 50% / 16px 16px;
+}
+/* 文本与转储一律走等宽 + 文本节点：不解析任何来自仓库的标记 */
+.preview-text,
+.preview-hex {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
 .ref-name {
   overflow: hidden;
   text-overflow: ellipsis;

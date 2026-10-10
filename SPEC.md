@@ -80,7 +80,62 @@
 - 原始 unified diff 正文（`patch`），供 Agent 直接消费
 - 合并提交：`patch` 为空、显示「合并提交或空 diff」提示，而非报错
 
-`[待实现]` 图片对比、媒体预览、字节预览
+- `[已实现]` 图片对比与预览（PNG / JPEG / GIF / WebP / BMP / SVG）：
+  新增 / 删除看单张，修改看**旧 vs 新并排**
+- `[已实现]` 字节预览：非图片的二进制以**十六进制转储**呈现（前 512 字节 + 真实大小）
+- `[已实现]` 按版本查看任意文件的文本内容（含既有 Renamed / Copied 的原路径）
+- `[待实现]` 音视频（`<video>` / `<audio>`）播放 —— 见下方「为什么不做媒体播放」
+
+#### blob 只读预览契约（US-3 剩余，补丁 P-10）
+
+**命令形状只有两种**（全部经 `git::Git::run*` 发出）：
+
+```
+git cat-file -s   -- <rev>:<path>     # 大小
+git cat-file blob -- <rev>:<path>     # 原始字节
+```
+
+- **为什么是 `cat-file`**：它是 plumbing —— 2026-10-10 实测证明三大前提：
+  ① 同一文件在配置了 smudge filter 的仓库里，**工作区是过滤后的内容（SMUDGED）、
+  `cat-file blob` 读到的是原始字节（REAL）**；② 不触发任何 hook；③ 不联网、不下载 LFS。
+- **绝不写 `--textconv` / `--filters`**：这两个开关在 `cat-file` 里真实存在且会执行
+  仓库自定义转换器。它们已在 `read-only-guard.sh` 的危险选项黑名单里
+  （见 `SECURITY.md` 威胁 1），写上去扫描器会直接拦下。
+- `--` 分隔符是**必须**的：`-s` 后面的 `<rev>` 若以 `-` 开头会被 git 当成选项
+  （实测 `-weird:f.txt` → `unknown switch`）；加 `--` 后被当作对象名（实测通过）。
+- 调用方还必须校验 `rev` / `path` 非空、且不以 `-` 开头（纯函数，可断言）。
+  命令一律经 `Command::args` 传递、不经 shell，因此 `;` / `$()` 等字符是惰性的
+  （实测注入串没有产生任何副作用文件）。
+
+**先看大小，再决定读不读**（与 diff 路径不同：diff 是先读后截断）：
+
+| 调用 | 子进程 | 说明 |
+|------|--------|------|
+| `blob_info()` | **1** | 只 `-s`，永远不读内容 |
+| `blob_preview()` | **2** | `-s` 后再 `blob`；超过上限就**不读内容** |
+
+- `-s` 的成功**不代表那是文件**：目录也会返回一个数字（实测 29），
+  只有 `cat-file blob` 会失败（exit 128）。所以 size 只用来判断「值不值得读」，
+  绝不能当作「这是一个文件」的证明；第二次调用失败必须**显式报错**，不能显示那个数字。
+- 上限：**读取 4 MiB**（`MAX_PREVIEW_BYTES`）、**文本呈现 256 KiB**、**十六进制 512 字节**。
+  超出一律**显式标记** `too_large` / `truncated` 并给出真实大小 —— 不静默丢弃。
+- 取舍理由：`-s` 对 5 MiB blob 实测 30ms 内返回；若先读内容，一个 2 GiB 的 blob
+  会被整个读进内存。反过来，用户主动点击后才读，所以这两次子进程的代价是可接受的。
+
+**LFS 指针必须被识别而非解析**：以 `version https://git-lfs.github.com/spec/v1`
+开头的纯文本是 LFS 指针（实测 130 字节）。此时**只展示其中的 object id 与 size**，
+并说明「未下载」—— 不调用 `git lfs`、不发任何网络请求（`SECURITY.md` 威胁 2）。
+
+**渲染安全**：SVG 只能作为 `<img>` 的 data URL 渲染，**不得 inline 到 DOM** ——
+inline SVG 会执行其中的脚本与事件处理器。所有文案走文本节点（沿用威胁 3 的规则）。
+
+**不在 diff 里自动预览**：只有用户点击某个文件才读取内容。
+自动预览会让打开一个含大图或大二进制的提交时，首屏成本变得不可预测。
+
+**为什么不做媒体播放**：`<video>` / `<audio>` 要求把**整段** blob 交给浏览器解码，
+这与上面「先看大小再决定读不读」的最小化原则直接冲突 —— 媒体文件几乎必然超过 4 MiB。
+要支持就得给媒体单独放宽上限，那等于把资源耗尽的口子重新打开（`SECURITY.md` 威胁 6）。
+在「同时保住预览能力与众进程/内存边界」的方案出现之前，这一条保持 `[待实现]`。
 
 #### 安全约束（不可协商，见 SECURITY.md）
 
@@ -324,7 +379,9 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | MCP Server | core 直接输出（5 个工具）     | P1     | 已实现     |
 | LLM 摘要   | 本地模型（Ollama，回环地址）  | P1     | 已实现（默认关闭） |
 | 虚拟滚动   | 前端渲染层，无新增数据源      | P0     | 已实现     |
-| 图片 / 字节预览 | `git cat-file`         | P0     | 待实现     |
+| 图片对比与预览 | `cat-file blob` + 魔法字节识别       | P0     | 已实现     |
+| 字节预览（十六进制转储） | `cat-file blob`            | P0     | 已实现     |
+| 音视频播放 | `<video>` / `<audio>`                    | P1     | 待实现     |
 | worktree / stash 列表 | `worktree list --porcelain` / `stash list` | P0 | 已实现 |
 | 进行中操作状态 | `<git-dir>` 下的标志文件（零子进程） | P0 | 已实现 |
 | 文件热度   | `git log --numstat`         | P2     | 待实现     |
@@ -343,6 +400,9 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | `WorkspaceInfo` | `worktrees: WorktreeInfo[]` + `stashes: StashInfo[]`（`Git::workspace()` 产出） |
 | `WorktreeInfo` | `path` / `branch`（分离时 `null`）/ `commit` / `bare` / `detached` / `locked` / `is_main` |
 | `StashInfo` | `reference`（`stash@{n}`）/ `commit` / `message` |
+| `BlobPreview` | blob 预览：`size` / `kind` / `content`（base64）/ `text` / `hex` / `truncated` / `too_large` |
+| `BlobKind` | `image` / `text` / `binary` / `lfs_pointer` / `too_large`（`size` 永远给出真实值） |
+| `ImageFormat` | `png` / `jpeg` / `gif` / `webp` / `bmp` / `svg`，由魔法字节判定，不靠扩展名 |
 | `HeadInfo` | `branch`（detached 时为 `null`）/ `commit` / `detached` / `upstream` |
 | `UpstreamInfo` | `name` / `ahead` / `behind` |
 | `BranchInfo` / `TagInfo` | 名称 + 指向的提交 |

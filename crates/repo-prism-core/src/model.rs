@@ -169,6 +169,83 @@ pub struct WorkspaceInfo {
     pub stashes: Vec<StashInfo>,
 }
 
+// ---------------------------------------------------------------------------
+// blob 只读预览（US-3，补丁 P-10）
+// ---------------------------------------------------------------------------
+
+/// 图片格式。由**魔法字节**判定，不靠扩展名 ——
+/// 扩展名是仓库作者可以随便写的，而 bytes 才是它到底是什么的唯一证据。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Svg,
+}
+
+impl ImageFormat {
+    /// `<img>` 的 MIME 类型。SVG 必须是 `image/svg+xml` 才能被 `<img>` 渲染
+    /// （而且只有走 `<img>` 才不执行其中的脚本 —— 见 SPEC「渲染安全」）。
+    pub fn media_type(&self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+            Self::Bmp => "image/bmp",
+            Self::Svg => "image/svg+xml",
+        }
+    }
+}
+
+/// 一个 blob 属于哪一类预览。
+///
+/// 用可辨识联合而不是「一堆可为 null 的字段」，是为了让调用方**穷尽**处理：
+/// 新增一类时会先在 `match` 上报编译错误，不会出现「新类型被当成未知二进制」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlobKind {
+    /// 图片。`format` 决定 `<img>` 的 MIME。
+    Image { format: ImageFormat },
+    /// 纯文本（合法 UTF-8 且不含 NUL）。
+    Text,
+    /// 认不出来的二进制。以十六进制转储呈现。
+    Binary,
+    /// **LFS 指针**。只展示其中的 object id 与 size，**从未下载过真实内容**。
+    LfsPointer { oid: String, size: u64 },
+    /// 超过读取上限，**内容完全没有读取**。此时 `size` 是唯一真实的信息。
+    TooLarge,
+}
+
+/// 某个 `<rev>:<path>` 的内容预览（US-3，补丁 P-10）。
+///
+/// # 三条「永远不说谎」的规则
+///
+/// 1. `size` **永远**是仓库里那个文件的真实字节数 —— 即使内容没读。
+///    用户据此判断「要不要为它单独想办法」。
+/// 2. `too_large` 与 `truncated` 是**两件事**：前者是「一个字节都没读」，
+///    后者是「读了但呈现时截断」。混为一谈会让用户以为看到的就是全部。
+/// 3. 没有 `Option::None` 表示「未知」的口子 —— 每一类都明确填了该填的字段，
+///    没填的就是不适用，不是「取值失败」。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobPreview {
+    pub size: u64,
+    pub kind: BlobKind,
+    /// base64 编码的原始字节。图片类才有值。
+    pub content: Option<String>,
+    /// 文本预览。文本类才有值。
+    pub text: Option<String>,
+    /// 十六进制转储。未知二进制类才有值。
+    pub hex: Option<String>,
+    /// 读了内容，但呈现时被截断（此时 `too_large == false`）。
+    pub truncated: bool,
+    /// 超过读取上限，**一个字节都没读**。
+    pub too_large: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub sha: String,

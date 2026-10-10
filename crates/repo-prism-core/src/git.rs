@@ -37,6 +37,34 @@ const REF_PREFIXES: [&str; 3] = ["refs/heads", "refs/tags", "refs/remotes"];
 /// 宁可多起一个子进程，也不要让「算缓存键」比它省下的那次调用更贵。
 const REF_FINGERPRINT_BUDGET: usize = 4 * 1024 * 1024;
 
+// --- blob 预览的三道闸（US-3，补丁 P-10）------------------------------------
+// 三个数分别对应「读不读」「文本呈现多少」「十六进制转储多少」。
+// 分成三个而不是共用一个，是因为它们守的不是同一种资源：
+// 读取上限守的是**内存**（一个 2 GiB 的 blob 会被整个读进来），
+// 另两个守的是 IPC 载荷与 UI 渲染。
+
+/// **读取**上限。超过就一个字节都不读，只报真实大小。
+const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
+
+/// **文本呈现**上限。超出即 `truncated`（落在字符边界上）。
+const MAX_PREVIEW_TEXT_BYTES: usize = 256 * 1024;
+
+/// **十六进制转储**的字节数上限（每行 16 字节，即最多 32 行）。
+const HEX_PREVIEW_BYTES: usize = 512;
+
+/// LFS 指针的首行（US-3，补丁 P-10）。
+///
+/// 实测：Git LFS 写出的指针文件是 130 字节纯文本，首行就是这一串。
+/// 认出它意味着「这个文件的内容不在这个仓库里」——
+/// 此时只展示指针里的 object id 与 size，**绝不下载**
+/// （`SECURITY.md` 威胁 2：下载会联网，而这是一款本地优先的工具）。
+const LFS_POINTER_PREFIX: &str = "version https://git-lfs.github.com/spec/v1";
+
+/// 判定「像不像 SVG」时最多往前看的字节数。
+///
+/// 一个 4 MiB 的文件没必要为判断类型整体转小写 —— 形状已经在前几百字节里定了。
+const SVG_SNIFF_BYTES: usize = 4 * 1024;
+
 /// `git stash list` 的字段格式（US-1，补丁 P-09）。
 ///
 /// 与 [`COMMIT_FORMAT`] 同款：`\x1f` 分隔字段、`\x1e` 分隔记录。
@@ -361,6 +389,115 @@ impl Git {
             return Ok(None);
         };
         Ok(parse_remote(url.trim()))
+    }
+
+    /// 某个 `<rev>:<path>` 的字节数（US-3，补丁 P-10）。
+    ///
+    /// **恰好 1 次子进程，且永远不读内容** —— 这正是它存在的理由：
+    /// 调用方先花一次便宜的调用判断「值不值得读」，而不是先把东西捞回来再说。
+    /// 实测 `-s` 对一个 5 MiB 的 blob 只要 30ms。
+    ///
+    /// ⚠️ **返回 `Some(_)` 不代表那是文件**：`cat-file -s` 对**目录**同样成功并返回
+    /// 一个数字（实测 29）。它只证明「这个 spec 解析得到某个对象」，
+    /// 要确认是普通文件必须真的去读（见 [`Self::blob_preview`]）。
+    pub fn blob_size(&self, rev: &str, path: &str) -> Result<Option<u64>> {
+        let spec = blob_spec(rev, path)?;
+        Ok(self
+            .run(&["cat-file", "-s", "--", &spec])?
+            .and_then(|text| text.trim().parse::<u64>().ok()))
+    }
+
+    /// 某个 `<rev>:<path>` 的内容预览（US-3，补丁 P-10）。
+    ///
+    /// **恰好 2 次子进程**：先 `-s` 量大小，再 `blob` 读字节。
+    ///
+    /// # 为什么会失败
+    ///
+    /// - `<rev>:<path>` 不存在 → `Err`（第一次调用就失败）
+    /// - 那个 spec 解析成了**目录** → `Err`（第一次调用可能成功、第二次必然失败；
+    ///   实测 `cat-file -s HEAD:<dir>` 返回 29 而 `cat-file blob` 报 `bad file`）
+    /// - `rev` / `path` 为空或以 `-` 开头 → `Err`（后者会被 git 当成选项，实测存在）
+    ///
+    /// 这三种都**报出来**而不是返回带默认值的结构 ——
+    /// 「这个路径下没有 blob」与「这个文件是空的」是两回事，
+    /// 降级成后者会让用户以为看到了全部。
+    pub fn blob_preview(&self, rev: &str, path: &str) -> Result<BlobPreview> {
+        let spec = blob_spec(rev, path)?;
+
+        let Some(size) = self
+            .run(&["cat-file", "-s", "--", &spec])?
+            .and_then(|text| text.trim().parse::<u64>().ok())
+        else {
+            anyhow::bail!("{spec} 在这个仓库里不存在（版本或路径不对）");
+        };
+
+        let too_large = size > MAX_PREVIEW_BYTES;
+        let mut preview = BlobPreview {
+            size,
+            kind: BlobKind::TooLarge,
+            content: None,
+            text: None,
+            hex: None,
+            truncated: false,
+            too_large,
+        };
+
+        // 太大就到此为止 —— 一个字节都不读。
+        if too_large {
+            return Ok(preview);
+        }
+
+        let Some(bytes) = self.run_bytes(&["cat-file", "blob", "--", &spec])? else {
+            anyhow::bail!("{spec} 不是普通文件（可能是一个目录），无法预览其内容");
+        };
+
+        preview.kind = classify_blob(&bytes);
+        match preview.kind {
+            BlobKind::Image { .. } => {
+                preview.content = Some(encode_base64(&bytes));
+            }
+            BlobKind::Text => {
+                let Some(text) = bytes_to_text(&bytes) else {
+                    // 分类与解码应当一致；走到这里说明两条判据出现了分歧，
+                    // 宁可按未知二进制处理也不要 panic。
+                    preview.kind = BlobKind::Binary;
+                    preview.hex = Some(hex_dump(&bytes));
+                    return Ok(preview);
+                };
+                let (text, truncated) = cap_text_preview(text);
+                preview.text = Some(text);
+                preview.truncated = truncated;
+            }
+            BlobKind::Binary => {
+                let (head, truncated) = cap_hex_bytes(&bytes);
+                preview.hex = Some(hex_dump(head));
+                preview.truncated = truncated;
+            }
+            BlobKind::LfsPointer { .. } | BlobKind::TooLarge => {
+                // 指针：内容就是那几行文本，但没有下载到的东西可以展示。
+                // TooLarge 已经在上面对话过早返回了。
+            }
+        }
+        Ok(preview)
+    }
+
+    /// 只读执行 Git 命令，**返回原始字节**。返回 `None` 表示命令失败但不致命。
+    ///
+    /// 与 [`Self::run`] 的差别只有结果类型：blob 内容不保证是 UTF-8，
+    /// 用 `String::from_utf8` 把一个 PNG 变成错误是荒谬的。
+    /// spawn 计数同样在这里累加。
+    fn run_bytes(&self, args: &[&str]) -> Result<Option<Vec<u8>>> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to git spawn {:?}", args))?;
+        self.spawns.fetch_add(1, Ordering::Relaxed);
+        if !out.status.success() {
+            return Ok(None);
+        }
+        Ok(Some(out.stdout))
     }
 
     /// 工作区（含已暂存）的逐文件行数统计。
@@ -1036,13 +1173,212 @@ fn cap_patch(patch: String) -> (String, bool) {
     (patch[..end].to_string(), true)
 }
 
+// ---------------------------------------------------------------------------
+// blob 预览的纯函数（US-3，补丁 P-10）
+//
+// 全部不碰进程、不碰文件系统，只是「字节 → 结论」。这样「内容写着 .txt 实际是 PNG」
+// 「WebP 与 AVI 都是 RIFF 开头」这类判据能被逐条断言，而不是只能靠真实仓库碰运气。
+// ---------------------------------------------------------------------------
+
+/// 拼出 `<rev>:<path>`，并拒绝会被 git 当成**选项**的输入。
+///
+/// `--` 那层分隔符我们在命令里已经加了（`cat-file -s -- <spec>`），
+/// 这里再挡一道的理由是**纵深防御**：实测 `-weird:f.txt` 在没有 `--` 时会被
+/// git 解析成 `unknown switch 'w'`。两道都留着，任一道失效时另一道还在。
+fn blob_spec(rev: &str, path: &str) -> Result<String> {
+    if rev.is_empty() {
+        anyhow::bail!("版本号不能为空");
+    }
+    if path.is_empty() {
+        anyhow::bail!("文件路径不能为空");
+    }
+    if rev.starts_with('-') || path.starts_with('-') {
+        anyhow::bail!("版本号与路径不得以连字符开头（会被 git 当成选项）");
+    }
+    Ok(format!("{rev}:{path}"))
+}
+
+/// 判断这段字节属于哪一类预览。
+///
+/// # 顺序即语义
+///
+/// 1. **LFS 指针**排在最前 —— 它是**纯文本**，晚于文本判定就会被当成普通文本文件，
+///    用户会以为看到的是全部内容。认出它很重要：这意味着内容其实不在仓库里。
+/// 2. **魔法字节**（非文本的图片格式）在文本判定之前 —— JPEG / PNG 全是合法字节，
+///    但几乎不可能是合法 UTF-8，顺序反过来通常也走得通；放在前面是为了让
+///    「编解码与分类用同一套判据」这件事显式成立。
+/// 3. 剩下的：合法 UTF-8 且不含 NUL → 文本（其中像 SVG 的再认成图片），否则未知二进制。
+fn classify_blob(bytes: &[u8]) -> BlobKind {
+    if let Some((oid, size)) = parse_lfs_pointer(bytes) {
+        return BlobKind::LfsPointer { oid, size };
+    }
+    if let Some(format) = classify_image(bytes) {
+        return BlobKind::Image { format };
+    }
+    match bytes_to_text(bytes) {
+        Some(text) if looks_like_svg(&text) => BlobKind::Image {
+            format: ImageFormat::Svg,
+        },
+        Some(_) => BlobKind::Text,
+        None => BlobKind::Binary,
+    }
+}
+
+/// 靠魔法字节识别**非文本**的图片格式。SVG 不在这里 —— 它是文本，
+/// 得先按文本解码才能看它的形状。
+fn classify_image(bytes: &[u8]) -> Option<ImageFormat> {
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    const JPEG: [u8; 3] = [0xff, 0xd8, 0xff];
+
+    if bytes.starts_with(PNG) {
+        return Some(ImageFormat::Png);
+    }
+    if bytes.len() >= JPEG.len() && bytes[..3] == JPEG {
+        return Some(ImageFormat::Jpeg);
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some(ImageFormat::Gif);
+    }
+    // `RIFF` 是**容器**而不是格式 —— AVI / WAV 都是这个开头。
+    // 必须再核对第 8–12 字节是不是 `WEBP`，否则会把一批音视频误判成图片。
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some(ImageFormat::Webp);
+    }
+    if bytes.starts_with(b"BM") {
+        return Some(ImageFormat::Bmp);
+    }
+    None
+}
+
+/// 这段文本像不像 SVG。
+///
+/// 只看前 [`SVG_SNIFF_BYTES`] 个字节：形状（XML 声明 + 根元素）在前几百字节就定了，
+/// 为一个 4 MiB 的文件整体转小写不值得。
+fn looks_like_svg(text: &str) -> bool {
+    let mut end = SVG_SNIFF_BYTES.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let lowered = text[..end].to_ascii_lowercase();
+    let trimmed = lowered.trim_start();
+    if trimmed.starts_with("<svg") {
+        return true;
+    }
+    // 带 XML 声明的形状：`<?xml version="1.0"?>\n<svg …>`
+    if let Some(rest) = trimmed.strip_prefix("<?xml") {
+        if let Some((_, after)) = rest.split_once("?>") {
+            return after.trim_start().starts_with("<svg");
+        }
+    }
+    false
+}
+
+/// 解析 LFS 指针文本，**不下载**它指向的内容。
+///
+/// 指针长这样（实测 130 字节）：
+///
+/// ```text
+/// version https://git-lfs.github.com/spec/v1
+/// oid sha256:4d7a2146…
+/// size 12345
+/// ```
+///
+/// 两条字段缺一不可：只有 oid 没有 size，用户连「这个文件有多大」都不知道；
+/// 反过来也一样。缺任一条就当它不是指针（判不出比误判安全）。
+fn parse_lfs_pointer(bytes: &[u8]) -> Option<(String, u64)> {
+    if !bytes.starts_with(LFS_POINTER_PREFIX.as_bytes()) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut oid: Option<String> = None;
+    let mut size: Option<u64> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("oid sha256:") {
+            oid = Some(rest.trim().to_string());
+        }
+        if let Some(rest) = line.strip_prefix("size ") {
+            size = rest.trim().parse::<u64>().ok();
+        }
+    }
+    Some((oid?, size?))
+}
+
+/// 这段字节能不能当文本读。NUL 是二进制最可靠的单一指标；
+/// 空字节数为 0 的空文件也算文本（是一个空的 UTF-8 串）。
+fn bytes_to_text(bytes: &[u8]) -> Option<String> {
+    if bytes.contains(&0) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok().map(str::to_string)
+}
+
+/// 截断文本预览，务必落在**字符边界**上。
+fn cap_text_preview(text: String) -> (String, bool) {
+    if text.len() <= MAX_PREVIEW_TEXT_BYTES {
+        return (text, false);
+    }
+    let mut end = MAX_PREVIEW_TEXT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+/// 十六进制转储只看前 [`HEX_PREVIEW_BYTES`] 个字节。
+///
+/// 返回是否被截断 —— 用户必须知道「后面还有」，否则会误以为文件就这么大。
+fn cap_hex_bytes(bytes: &[u8]) -> (&[u8], bool) {
+    if bytes.len() <= HEX_PREVIEW_BYTES {
+        return (bytes, false);
+    }
+    (&bytes[..HEX_PREVIEW_BYTES], true)
+}
+
+/// 经典十六进制转储：`偏移 + 十六进制列 + ASCII 列`。
+///
+/// 最后一行不满 16 字节时**不补空位** —— 补空位会让「文件到底在哪结束」变得
+/// 要靠数空格才能看出来，也让这条纯函数的期望字符串难以写死断言。
+fn hex_dump(bytes: &[u8]) -> String {
+    const WIDTH: usize = 16;
+    let mut out = String::new();
+    use std::fmt::Write as _;
+
+    for (index, chunk) in bytes.chunks(WIDTH).enumerate() {
+        let offset = index * WIDTH;
+        let _ = write!(out, "{offset:08x}  ");
+        for byte in chunk {
+            let _ = write!(out, "{byte:02x} ");
+        }
+        out.push_str(" |");
+        for byte in chunk {
+            // 空格也算「可见」：全用它自己的字形，读的人能直接看出缩进
+            out.push(if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            });
+        }
+        out.push_str("|\n");
+    }
+    out
+}
+
+/// base64（标准字母表，带填充）。用现成实现而不是手写：
+/// 编码错位不会报错，只会让图片显示成一团噪声 —— 那种 bug 很难看出是编码器错。
+fn encode_base64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cap_patch, parse_ahead_behind, parse_head_meta, parse_remote, parse_stashes,
-        parse_worktrees, read_number, state_from_markers, MAX_DIFF_BYTES,
+        blob_spec, bytes_to_text, cap_hex_bytes, cap_patch, cap_text_preview, classify_blob,
+        hex_dump, looks_like_svg, parse_ahead_behind, parse_head_meta, parse_lfs_pointer,
+        parse_remote, parse_stashes, parse_worktrees, read_number, state_from_markers,
+        HEX_PREVIEW_BYTES, MAX_DIFF_BYTES, MAX_PREVIEW_TEXT_BYTES,
     };
-    use crate::model::RepoState;
+    use crate::model::{BlobKind, ImageFormat, RepoState};
 
     // 注意：本模块位于 core/src 下，会被 read-only guard 扫描。
     // 第四层（写动词黑名单）**全局生效、不看语句是否在调 Git**，所以这里
@@ -1467,5 +1803,186 @@ stash@{1}\x1f9f8e7d6\x1fWIP on main: 1a2b3c4 first\n\x1e";
     #[test]
     fn stashes_of_empty_output_is_an_empty_list() {
         assert!(parse_stashes("").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // blob 预览的纯函数（US-3，补丁 P-10）
+    //
+    // 这些判据全靠 magic bytes / 文本形状，**必须**逐条钉住：
+    // 判据错了的表现不是报错，而是「图片显示为未知二进制」或「音视频被当成图片」，
+    // 在真实仓库里要碰运气才遇得到。
+    // -----------------------------------------------------------------------
+
+    fn png() -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x0d]);
+        bytes
+    }
+
+    fn sample(name: &str) -> Vec<u8> {
+        match name {
+            "png" => png(),
+            "jpeg" => vec![0xff, 0xd8, 0xff, 0xe0],
+            "gif" => b"GIF89a".to_vec(),
+            "webp" => b"RIFF\x1e\x00\x00\x00WEBP".to_vec(),
+            "bmp" => b"BM\x28\x00\x00\x00".to_vec(),
+            other => panic!("未知样本 {other}"),
+        }
+    }
+
+    #[test]
+    fn image_types_are_recognized_by_magic_bytes() {
+        let cases = [
+            ("png", ImageFormat::Png),
+            ("jpeg", ImageFormat::Jpeg),
+            ("gif", ImageFormat::Gif),
+            ("webp", ImageFormat::Webp),
+            ("bmp", ImageFormat::Bmp),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                classify_blob(&sample(name)),
+                BlobKind::Image { format: expected },
+                "{name} 应被识别为 {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn riff_container_without_webp_is_not_an_image() {
+        // `RIFF` 是容器：同一个开头可以是 AVI / WAV。
+        // 只看前 4 字节会把一批音视频误判成图片。
+        let avi = b"RIFF\x1e\x00\x00\x00AVI ".to_vec();
+        assert_ne!(
+            classify_blob(&avi),
+            BlobKind::Image {
+                format: ImageFormat::Webp
+            },
+            "RIFF 开头但第 8–12 字节不是 WEBP 的不能算图片"
+        );
+    }
+
+    #[test]
+    fn a_short_webp_header_is_rejected_instead_of_panicking() {
+        // 只有 6 字节却有 RIFF 开头：不能越界去读第 8–12 字节。
+        let short = b"RIFF\x02\x00".to_vec();
+        assert_ne!(
+            classify_blob(&short),
+            BlobKind::Image {
+                format: ImageFormat::Webp
+            }
+        );
+    }
+
+    #[test]
+    fn svg_is_recognized_with_and_without_an_xml_declaration() {
+        assert_eq!(
+            classify_blob(b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"),
+            BlobKind::Image {
+                format: ImageFormat::Svg
+            }
+        );
+        let declared = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg></svg>";
+        assert_eq!(
+            classify_blob(declared),
+            BlobKind::Image {
+                format: ImageFormat::Svg
+            },
+            "带 XML 声明的形状必须也算 —— 这是 SVG 最常见的写法"
+        );
+        assert!(looks_like_svg("<SVG></SVG>"), "根元素大小写不敏感");
+        assert!(!looks_like_svg("只是一段提到 svg 的文本"));
+    }
+
+    #[test]
+    fn an_lfs_pointer_is_a_pointer_not_a_text_file() {
+        let bytes =
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:4d7a2146\nsize 12345\n";
+        assert_eq!(
+            classify_blob(bytes),
+            BlobKind::LfsPointer {
+                oid: "4d7a2146".to_string(),
+                size: 12_345,
+            },
+            "指针必须在文本判定之前被认出来 —— 否则用户会以为看到的就是全部内容"
+        );
+        assert!(parse_lfs_pointer(bytes).is_some());
+    }
+
+    #[test]
+    fn a_pointer_missing_oid_or_size_is_not_a_pointer() {
+        let no_size = b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\n";
+        let no_oid = b"version https://git-lfs.github.com/spec/v1\nsize 99\n";
+        assert!(
+            parse_lfs_pointer(no_size).is_none() && parse_lfs_pointer(no_oid).is_none(),
+            "缺任一条就当它不是指针 —— 判不出比误判安全"
+        );
+    }
+
+    #[test]
+    fn text_needs_both_valid_utf8_and_no_null_byte() {
+        assert_eq!(classify_blob(b"hello\n"), BlobKind::Text);
+        assert!(bytes_to_text(b"broken \xff\xfe tail").is_none());
+        let with_null = b"a\x00b";
+        assert!(
+            bytes_to_text(with_null).is_none(),
+            "含 NUL 一律按二进制处理 —— 这是二进制最可靠的单一指标"
+        );
+        assert_eq!(classify_blob(with_null), BlobKind::Binary);
+        // 空文件是一个空的 UTF-8 串，算文本而不是「未知」
+        assert_eq!(classify_blob(b""), BlobKind::Text);
+    }
+
+    #[test]
+    fn hex_dump_prints_offset_hex_and_ascii_columns() {
+        assert_eq!(hex_dump(b"abc"), "00000000  61 62 63  |abc|\n");
+        // 不可见字节显示为点，而不是被直接塞进输出
+        assert!(hex_dump(&[0x00, 0xff]).contains("|..|"));
+        assert_eq!(
+            hex_dump(&[0x41; 17]).lines().count(),
+            2,
+            "17 字节应占两行（16 + 1）"
+        );
+    }
+
+    #[test]
+    fn text_preview_truncation_lands_on_a_char_boundary() {
+        let long = "中".repeat(MAX_PREVIEW_TEXT_BYTES / 3 + 10);
+        let (cut, truncated) = cap_text_preview(long);
+        assert!(truncated, "超长文本必须显式标记截断");
+        assert!(cut.len() <= MAX_PREVIEW_TEXT_BYTES);
+        assert!(
+            cut.len() >= MAX_PREVIEW_TEXT_BYTES - 3,
+            "应贴着上限切，而不是一刀切掉一大半：实际 {} 字节",
+            cut.len()
+        );
+        assert!(cut.chars().all(|c| c == '中'), "不得切开多字节字符");
+
+        let (short, truncated) = cap_text_preview("很短".to_string());
+        assert!(!truncated);
+        assert_eq!(short, "很短");
+    }
+
+    #[test]
+    fn hex_preview_is_capped_and_flagged() {
+        let bytes = vec![0x41; HEX_PREVIEW_BYTES + 100];
+        let (head, truncated) = cap_hex_bytes(&bytes);
+        assert_eq!(head.len(), HEX_PREVIEW_BYTES);
+        assert!(truncated, "用户必须知道后面还有");
+
+        let (all, truncated) = cap_hex_bytes(b"abc");
+        assert_eq!(all.len(), 3);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn blob_spec_refuses_inputs_git_would_parse_as_options() {
+        assert!(blob_spec("HEAD", "a.txt").is_ok());
+        assert!(blob_spec("", "a.txt").is_err(), "版本号不能为空");
+        assert!(blob_spec("HEAD", "").is_err(), "路径不能为空");
+        // 实测：`-weird:f.txt` 在没有 `--` 时会被 git 当成 `-w`。
+        // 命令里虽然已经加了 `--`，这里仍挡一道（纵深防御）。
+        assert!(blob_spec("-evil", "a.txt").is_err());
+        assert!(blob_spec("HEAD", "-a.txt").is_err());
     }
 }

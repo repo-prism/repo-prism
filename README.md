@@ -15,7 +15,8 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 - 🔗 **一键跳转**：GitDiagram / GitIngest / DeepWiki / GitHub.dev ✅
 - 🤖 **Agent 协同**：CLI ✅ / Skill ✅ / MCP Server（5 个只读工具）✅
 - 🧠 **本地 AI 摘要**：Ollama，仅回环地址，默认关闭 ✅
-- 🖼️ **图片对比 / 媒体预览 / 字节预览** —— 计划中
+- 🖼️ **blob 只读预览**：图片对比与预览（PNG / JPEG / GIF / WebP / BMP / SVG，
+  修改看「旧 vs 新」并排）、字节预览（前 512 字节十六进制转储）、按版本看文本 ✅
 - 📄 **文本化仓库（就地导出）** —— 计划中，当前走 GitIngest 跳转
 - 🏗️ **架构图（就地生成）** —— 计划中，当前走 GitDiagram 跳转
 - 📚 **AI 文档（就地问答）** —— 计划中，当前走 DeepWiki 跳转
@@ -25,6 +26,11 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 「本地 AI 摘要」指：默认关闭；启用后 RepoPrism 只会把**文件的相对路径与规则结果**
 发给你自己机器上的模型服务（只接受 `http://localhost` / `http://127.0.0.1` / `http://[::1]`），
 不发送仓库路径、remote 或 diff 正文，也不会发往任何云端服务。
+
+「blob 只读预览」指：**先看大小、再决定读不读**（超过 4 MiB 一个字节都不读），
+只用 `git cat-file`（实测不触发 smudge filter、不触发 hook、不联网，绝不写
+`--textconv` / `--filters`），LFS 指针**只识别不下载**，SVG 只经 `<img>` 渲染，
+且**不在 diff 里自动预览** —— 必须点击才读。音视频播放未实现。
 
 ## 不是什么
 

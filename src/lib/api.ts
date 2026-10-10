@@ -176,6 +176,47 @@ export async function getWorkspace(path: string): Promise<WorkspaceInfo> {
   return invoke<WorkspaceInfo>("get_workspace", { path });
 }
 
+// ---------------------------------------------------------------------------
+// blob 只读预览（US-3，补丁 P-10）
+//
+// 只有用户点开某个文件时才会调用 —— 它需要起 1–2 次子进程，且读的是真实字节，
+// 不能进首屏路径（SPEC「不在 diff 里自动预览」）。
+// ---------------------------------------------------------------------------
+
+export type ImageFormat = "png" | "jpeg" | "gif" | "webp" | "bmp" | "svg";
+
+/** 用可辨识联合，`switch` 漏掉一类会在类型层面报错。 */
+export type BlobKind =
+  | { kind: "image"; format: ImageFormat }
+  | { kind: "text" }
+  | { kind: "binary" }
+  | { kind: "lfs_pointer"; oid: string; size: number }
+  | { kind: "too_large" };
+
+export interface BlobPreview {
+  /** 仓库里该文件的**真实**字节数。永远给出，即使内容一个字节都没读。 */
+  size: number;
+  kind: BlobKind;
+  /** base64 编码的原始字节（图片）。 */
+  content: string | null;
+  /** 文本预览（文本）。 */
+  text: string | null;
+  /** 十六进制转储（未知二进制）。 */
+  hex: string | null;
+  /** 读了，但呈现时截断。 */
+  truncated: boolean;
+  /** 超过上限，**一个字节都没读**。 */
+  too_large: boolean;
+}
+
+export async function getBlobPreview(
+  path: string,
+  rev: string,
+  filePath: string,
+): Promise<BlobPreview> {
+  return invoke<BlobPreview>("get_blob_preview", { path, rev, filePath });
+}
+
 export async function inspectRepo(path: string): Promise<RepoSnapshot> {
   return invoke<RepoSnapshot>("inspect_repo", { path });
 }

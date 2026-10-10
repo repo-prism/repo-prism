@@ -93,6 +93,18 @@ impl TempRepo {
         self.git(&["commit", "-m", message]);
     }
 
+    /// 写入**二进制**文件（相对仓库根目录）。
+    ///
+    /// 图片 / LFS 指针这类夹具用 [`Self::write`] 写不了 —— 那条走 `&str`，
+    /// 会把任意一个非法 UTF-8 字节组合拒之门外。
+    pub fn write_bytes(&self, rel: &str, bytes: &[u8]) {
+        let full = self.path.join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).expect("failed to create parent dir");
+        }
+        fs::write(full, bytes).expect("failed to write file");
+    }
+
     /// 以固定的作者/提交者时间提交，使 `git log` 的输出顺序稳定。
     ///
     /// 连续创建的提交若落在同一秒，git 的排序在同秒提交间并不稳定，

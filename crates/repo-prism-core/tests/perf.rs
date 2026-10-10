@@ -152,6 +152,14 @@ fn snapshot_and_commits_stay_within_budget() {
 /// 工作树列表 + stash 列表需要起进程，所以它们**没有**并进 `snapshot()`，
 /// 而是走独立的 `workspace()`（2 次）。两条约束合起来才是完整的契约：
 /// 快照的次数与「要不要这两块」无关，而 `workspace()` 的次数是确定的 2。
+///
+/// # P-10 之后多了一组 blob 预览，它的次数是**有条件的**
+///
+/// `blob_size()` 恒为 1、`blob_preview()` 对一个普通文件是 2，
+/// 但对**超过上限**的文件是 **1** —— 第二次调用压根没发生，因为内容没读。
+/// 这是本卡唯一一处「次数随参数变化」，而变化的方向恰恰是我们想证明的性质
+/// （先看大小再决定读不读），所以它不是契约的裂缝，它就是契约。
+/// 那条「超限时只起 1 次」的断言在 `tests/preview.rs`，本夹具里没有超限文件。
 #[test]
 fn spawn_counts_are_pinned() {
     let repo = TempRepo::new("spawns");
@@ -219,4 +227,23 @@ fn spawn_counts_are_pinned() {
     let before = git.spawns();
     git.diff(None, None).expect("diff");
     assert_eq!(git.spawns() - before, 2, "diff() 是 names(1) + patch(1)");
+
+    // P-10 的 blob 预览：**先看大小、再决定读不读**，所以次数本身就是这条性质的证明。
+    let before = git.spawns();
+    git.blob_size("HEAD", "f.txt").expect("blob_size");
+    assert_eq!(
+        git.spawns() - before,
+        1,
+        "blob_size() 只做一次大小查询，永远不读内容"
+    );
+
+    let before = git.spawns();
+    git.blob_preview("HEAD", "f.txt").expect("blob_preview");
+    assert_eq!(
+        git.spawns() - before,
+        2,
+        "blob_preview() 是 -s(1) + blob(1)；若变成 1，说明有人为了省一次调用"
+    );
+    // 反过来，**超过上限时只该起 1 次** —— 那才是「没读内容」的证明。
+    // 它不能写在这里（这个夹具里没有超限文件），在 `tests/preview.rs`。
 }

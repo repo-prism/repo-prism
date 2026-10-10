@@ -2,7 +2,16 @@ import { useState } from "react";
 import { type CommitDetail as CommitDetailData, type Diff, summarizeCommit } from "../lib/api";
 import { formatBytes, formatRelativeDate } from "../lib/format";
 import { kindLabel, kindText } from "../lib/kinds";
+import { previewSides, type Target } from "../lib/preview";
+import { BlobPreviewPanel } from "./BlobPreviewPanel";
 import { DiffView } from "./DiffView";
+
+/** 被点开的那个文件，以及要取哪几个版本。 */
+interface PreviewTarget {
+  path: string;
+  before: Target | null;
+  after: Target | null;
+}
 
 interface Props {
   repoPath: string;
@@ -32,6 +41,7 @@ export function CommitDetail({
   onClose,
   onSelectCommit,
 }: Props) {
+  const [preview, setPreview] = useState<PreviewTarget | null>(null);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -147,7 +157,20 @@ export function CommitDetail({
                 <span className={`kind kind-${file.kind}`} title={kindText(file.kind)}>
                   {kindLabel(file.kind)}
                 </span>
-                <span className="path">{file.path}</span>
+                {/* 只有点开才读内容 —— 读取要起子进程，不能跟着首屏走 */}
+                <button
+                  type="button"
+                  className="file-open"
+                  title="查看这个版本的内容"
+                  onClick={() =>
+                    setPreview({
+                      path: file.path,
+                      ...previewSides(file.kind, file.path, file.old_path, info.sha, info.parents),
+                    })
+                  }
+                >
+                  {file.path}
+                </button>
                 {file.old_path && <span className="muted">← {file.old_path}</span>}
                 {file.binary && <span className="tag">二进制</span>}
                 <span className="diff-stat">
@@ -159,6 +182,17 @@ export function CommitDetail({
           </ul>
         )}
       </div>
+
+      {preview && (
+        <BlobPreviewPanel
+          key={`${preview.before?.rev}-${preview.before?.path}-${preview.after?.rev}-${preview.after?.path}`}
+          repoPath={repoPath}
+          path={preview.path}
+          before={preview.before}
+          after={preview.after}
+          onClose={() => setPreview(null)}
+        />
+      )}
 
       {diff ? (
         <DiffView diff={diff} byteTruncated={truncated} />

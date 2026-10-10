@@ -1,6 +1,6 @@
 use repo_prism_core::{
-    build_commit_prompt, ChangeAnalysis, CommitDetail, CommitInfo, Diff, Git, LineStats,
-    OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSnapshot, Summarizer, WorkspaceInfo,
+    build_commit_prompt, BlobPreview, ChangeAnalysis, CommitDetail, CommitInfo, Diff, Git,
+    LineStats, OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSnapshot, Summarizer, WorkspaceInfo,
     DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS,
 };
 use std::path::PathBuf;
@@ -119,6 +119,21 @@ fn analyze_changes(path: String, state: State<'_, AppState>) -> Result<ChangeAna
 #[tauri::command]
 fn get_remote_info(path: String, state: State<'_, AppState>) -> Result<Option<RemoteInfo>, String> {
     with_git(&state, &path, |git| git.remote_info())
+}
+
+/// blob 内容预览（US-3，补丁 P-10）。
+///
+/// 这是全项目**唯一**会读取 blob 字节的入口。它不进首屏路径：
+/// 只有用户点开某个文件时才调用（SPEC「不在 diff 里自动预览」）。
+/// 读取前会先 `cat-file -s` 看大小，超过上限就一个字节都不读。
+#[tauri::command]
+fn get_blob_preview(
+    path: String,
+    rev: String,
+    file_path: String,
+    state: State<'_, AppState>,
+) -> Result<BlobPreview, String> {
+    with_git(&state, &path, |git| git.blob_preview(&rev, &file_path))
 }
 
 /// 工作树与 stash 列表（US-1，补丁 P-09）。
@@ -311,6 +326,7 @@ pub fn run() {
             analyze_changes,
             get_remote_info,
             get_workspace,
+            get_blob_preview,
             get_ai_settings,
             set_ai_settings,
             test_ai_connection,

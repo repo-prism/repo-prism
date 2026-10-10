@@ -73,6 +73,7 @@
 | [P-06](TASKS/patch/P-06-version-gate-gap.md) | 版本闸门补两个洞（成员继承 + Cargo.lock） | ✅ |
 | [P-07](TASKS/patch/P-07-http-path-coverage.md) | 本地模型 HTTP 路径用回环 stub 变实（原防线从未运行过） | ✅ 2026-10-09 |
 | [P-09](TASKS/patch/P-09-worktree-stash-state.md) | 补全 US-1 缺口：worktree / stash 列表 + 进行中操作状态（**零子进程**探测） | ✅ 2026-10-09 |
+| [P-10](TASKS/patch/P-10-blob-preview.md) | 补全 US-3 缺口：blob 只读预览（图片对比 / 十六进制转储 / LFS 指针识别） | ✅ 2026-10-10 |
 
 ---
 
@@ -84,25 +85,25 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **169 passed**（core 141 / CLI 14 / MCP 14）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故按包跑后加总 |
+| Rust 测试 | `cargo test --workspace` | ✅ **193 passed**（core 165 / CLI 14 / MCP 14）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故按包跑后加总 |
 | 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7）。**该门禁在 TASK-018 与 P-09 里都一字未改** —— 缓存是 opt-in、状态探测是文件探测，两条都不给快照加子进程，见下 |
 | 引用缓存失效（`TASK-018`） | `cargo test -p repo-prism-core --test cache` | ✅ **12 passed**：1 条「缓存确实命中」+ 7 条「引用一变必须失效」+ 4 条边界（工作区状态从不缓存 / 不开启时行为不变 / 链接工作树 / 分支改名）。失败路径由 6 个探针反证 |
 | 工作区状态与列表（P-09） | `cargo test -p repo-prism-core --test workspace` | ✅ **11 passed**：真实 git 造出冲突合并 / 变基（含进度）/ 摘取 / 回退 / 二分 / 链接工作树 / stash，逐项断言。另含 lib 内 14 条纯函数单测（`state_from_markers` / `parse_worktrees` / `parse_stashes`）。Rust 侧 9 条 + 前端侧 4 条失败路径探针全部反证通过 |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
-| 前端 lint | `biome check src` | ✅ 31 files |
+| 前端 lint | `biome check src` | ✅ 34 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
-| 前端测试 | `vitest run` | ✅ 55 passed（6 files；新增 `workspace.test.ts` 14 条） |
-| 前端构建 | `vite build` | ✅ `dist/assets/index-BhCBfIgt.js` 247.54 kB（gzip 77.26 kB） |
+| 前端测试 | `vitest run` | ✅ 71 passed（7 files；新增 `workspace.test.ts` 14 条、`preview.test.ts` 16 条） |
+| 前端构建 | `vite build` | ✅ `dist/assets/index-BRbENeDd.js` 251.04 kB（gzip 78.39 kB） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.2.0` |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
 
-**core 141 项的构成**：lib 67（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
+**core 165 项的构成**：lib 67（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
 `parse_head_meta`，以及 P-09 新增的状态探测与列表解析纯函数 **+14**）/ analysis 5 /
 diff 10 / perf 2 / remote 5 / snapshot 16 / `summarizer_http` 8（P-07）/
 `summarizer_egress` 1 + `summarizer_contract` 4（P-08）/ `cache` 12（TASK-018）/
-**`workspace` 11（P-09）**。
+**`workspace` 11（P-09）/ `preview` 13（P-10）**，另有 lib 内纯函数 +11（P-10 的类型判据与转储）。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
 
@@ -118,6 +119,12 @@ diff 10 / perf 2 / remote 5 / snapshot 16 / `summarizer_http` 8（P-07）/
 所以缓存只在 `Git::open_cached`（桌面端会话）下开启，`Git::open` 的行为与逐次成本
 **逐字不变**，门禁一字未改且仍然通过。缓存自己的契约（命中省几次、以及更重要的
 **引用一变就必须失效**）在 `tests/cache.rs`，那里数的是真实子进程次数。
+
+**P-10 的 blob 预览是唯一「次数随参数变化」的契约**：`blob_size()` 恒为 1、
+`blob_preview()` 对一个普通文件是 2，但对**超过 4 MiB** 的文件是 **1** ——
+第二次调用压根没发生。变化的方向恰恰是我们要证明的性质（先看大小再决定读不读），
+所以它不是裂缝，它就是契约。这条断言在 `tests/preview.rs`，
+把那处早退删掉它立刻红（探针 R10）。
 
 **P-09 为什么把「进行中状态」放进快照、把 worktree / stash 分出去**：同一条理由的
 第三次应用 —— 判据是**这个字段值不值得一个子进程**。状态只需看 `<git-dir>` 下的
@@ -158,7 +165,7 @@ CI runner 无此问题，故未改项目配置。
 |---------|------|
 | US-1 仓库状态（分支 / HEAD / 标签 / 提交图 / 上游计数 / 进行中操作 / worktree / stash） | ✅ 已实现（P-09 补齐最后一条缺口） |
 | US-2 变更分组 + 风险角标 | ✅ 已实现 |
-| US-3 提交详情 + Diff（统一 / 并排，含原始行号，`patch` 原文） | ✅ 已实现（图片对比 / 字节预览待实现） |
+| US-3 提交详情 + Diff（统一 / 并排，含原始行号，`patch` 原文） | ✅ 已实现（含图片对比与字节预览；**音视频播放**仍 `[待实现]`，理由见 SPEC） |
 | US-4 CLI（`inspect` / `commits` / `detail` / `skill` + schema 信封） | ✅ 已实现（`open --view` 待实现） |
 | US-5 Agent Skill | ✅ 已实现 |
 | US-6 MCP Server（5 个只读工具） | ✅ 已实现 |
