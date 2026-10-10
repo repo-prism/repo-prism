@@ -14,7 +14,7 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 - ⚠️ **风险标记**：10 条纯本地启发式规则 + 摘要条 ✅
 - 🔍 **Diff**：统一 / 并排视图，含 Git 原始行号 ✅
 - 🔗 **一键跳转**：GitDiagram / GitIngest / DeepWiki / GitHub.dev ✅
-- 🤖 **Agent 协同**：CLI ✅ / Skill ✅ / MCP Server（5 个只读工具）✅
+- 🤖 **Agent 协同**：CLI ✅ / Skill ✅ / MCP Server（6 个只读工具）✅
 - 🧠 **本地 AI 摘要**：Ollama，仅回环地址，默认关闭 ✅
 - 🖼️ **blob 只读预览**：图片对比与预览（PNG / JPEG / GIF / WebP / BMP / SVG，
   修改看「旧 vs 新」并排）、字节预览（前 512 字节十六进制转储）、按版本看文本 ✅
@@ -32,6 +32,8 @@ RepoPrism 把同一份代码仓库，折射成多种视图：
 只用 `git cat-file`（实测不触发 smudge filter、不触发 hook、不联网，绝不写
 `--textconv` / `--filters`），LFS 指针**只识别不下载**，SVG 只经 `<img>` 渲染，
 且**不在 diff 里自动预览** —— 必须点击才读。音视频播放未实现。
+桌面端之外，CLI 的 `repoprism blob` 与 MCP 的 `repoprism_blob` 走的是同一套契约，
+`--size-only` / `size_only` 只报大小、一个字节都不读。
 
 「多仓库工作区」指：同时打开的仓库**各有一个会话**，切回去不重新读。
 上限 8 个，超了淘汰最久未用的那个 —— 淘汰只丢缓存、不丢正确性。
@@ -59,6 +61,10 @@ repoprism inspect . --json
 repoprism commits . --limit 50 --json
 repoprism detail . --sha <sha> --json
 
+# 文件内容预览（先量大小再读；--size-only 只读大小、一个字节都不读）
+repoprism blob . --file src/main.rs --json
+repoprism blob . --file assets/logo.png --size-only --json
+
 # Agent：取出打包好的 Skill
 repoprism skill --path      # 打印展开目录
 repoprism skill --print     # 直接打印内容
@@ -70,7 +76,7 @@ pnpm tauri dev
 MCP Server 见 [`crates/repo-prism-mcp/README.md`](crates/repo-prism-mcp/README.md)，
 Agent 使用说明见 [`skill/SKILL.md`](skill/SKILL.md)。
 
-MCP 暴露 5 个只读工具：
+MCP 暴露 6 个只读工具：
 
 | 工具 | 说明 |
 |------|------|
@@ -79,6 +85,7 @@ MCP 暴露 5 个只读工具：
 | `repoprism_detail(path, sha)` | 提交详情与原始 diff |
 | `repoprism_analyze(path)` | 未提交改动的本地风险分析 |
 | `repoprism_remote(path)` | `origin` 的 host / owner / repo（无 remote 返回 `null`） |
+| `repoprism_blob(path, file, rev?, size_only?)` | 某个版本下单个文件的内容预览（`size_only` 只报大小、不读内容） |
 
 ## 本地 AI（可选）
 

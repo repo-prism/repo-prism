@@ -148,7 +148,7 @@ fn initialize_reports_protocol_and_capabilities() {
 }
 
 #[test]
-fn tools_list_exposes_exactly_five_readonly_tools() {
+fn tools_list_exposes_exactly_six_readonly_tools() {
     let responses = serve(&format!(
         "{}\n",
         request(1, "tools/list", serde_json::json!({}))
@@ -166,6 +166,7 @@ fn tools_list_exposes_exactly_five_readonly_tools() {
             "repoprism_detail",
             "repoprism_analyze",
             "repoprism_remote",
+            "repoprism_blob",
         ],
         "工具集变化必须是有意的：多一个工具就是多一处 Agent 能触发的只读面"
     );
@@ -358,6 +359,149 @@ fn remote_tool_parses_a_github_url() {
     assert_eq!(data["host"], "github.com");
     assert_eq!(data["owner"], "repo-prism");
     assert_eq!(data["repo"], "repo-prism");
+}
+
+// --- blob 工具（P-11）-------------------------------------------------------
+// 前五个工具都只读「元数据」，blob 是唯一会读**文件内容**的。
+// 因此这里每条断言都同时盯两件事：读到的对不对，以及「该不读的是不是真的没读」。
+
+#[test]
+fn blob_tool_returns_a_text_preview() {
+    let repo = TempRepo::new("blob-text");
+    repo.write("a.txt", "hello blob\n");
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "a.txt" })
+        )
+    ));
+
+    assert_eq!(responses[0]["result"]["isError"], false);
+    let data = content_json(&responses[0]);
+    // `kind` 是带 tag 的枚举，线上形状是 `kind.kind`（另见 core 侧 preview_json 测试）
+    assert_eq!(data["kind"]["kind"], "text");
+    assert_eq!(data["text"], "hello blob\n");
+    assert_eq!(data["size"], 11, "size 必须是仓库里的真实字节数");
+    assert_eq!(data["too_large"], false);
+    assert_eq!(data["truncated"], false);
+}
+
+#[test]
+fn blob_tool_size_only_reports_the_size_and_no_content() {
+    let repo = TempRepo::new("blob-size");
+    repo.write("a.txt", "hello blob\n");
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "a.txt", "size_only": true })
+        )
+    ));
+
+    let data = content_json(&responses[0]);
+    assert_eq!(data["size"], 11);
+    assert_eq!(data["preview_cap_bytes"], 4 * 1024 * 1024);
+    // 「一个字节都没读」要有可断言的形状：内容字段**根本不存在**，不是 null 也不是空串。
+    for field in ["text", "content", "hex", "kind"] {
+        assert!(
+            data.get(field).is_none(),
+            "size_only 的结果里不应出现 {field}，实际 {data}"
+        );
+    }
+}
+
+#[test]
+fn blob_tool_reads_a_historic_revision_on_request() {
+    let repo = TempRepo::new("blob-rev");
+    repo.write("a.txt", "old\n");
+    repo.commit("c1");
+    repo.write("a.txt", "new\n");
+    repo.commit("c2");
+
+    // 不传 rev 时必须是 HEAD；传了就必须真的按那个版本读。
+    let responses = serve(&format!(
+        "{}\n{}\n",
+        call_tool(
+            1,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "a.txt" })
+        ),
+        call_tool(
+            2,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "a.txt", "rev": "HEAD~1" })
+        )
+    ));
+
+    assert_eq!(
+        content_json(&responses[0])["text"],
+        "new\n",
+        "默认应是 HEAD"
+    );
+    assert_eq!(content_json(&responses[1])["text"], "old\n");
+}
+
+#[test]
+fn blob_tool_on_an_lfs_pointer_never_shows_content() {
+    let repo = TempRepo::new("blob-lfs");
+    let pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:4d7a2146\nsize 12345\n";
+    repo.write("big.bin", pointer);
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "big.bin" })
+        )
+    ));
+
+    let data = content_json(&responses[0]);
+    assert_eq!(data["kind"]["kind"], "lfs_pointer");
+    assert_eq!(
+        data["kind"]["oid"], "4d7a2146",
+        "oid 要能直接读到，便于人工核对"
+    );
+    assert_eq!(data["kind"]["size"], 12345, "这是 LFS 对象的真实大小");
+    assert_eq!(
+        data["size"],
+        pointer.len() as u64,
+        "外层 size 是**指针文件本身**的大小 —— 与上面那个 size 不是一回事"
+    );
+    assert!(
+        data["text"].is_null(),
+        "指针的『内容』不在仓库里，不能当成文本呈现，实际 {data}"
+    );
+}
+
+#[test]
+fn blob_tool_on_a_missing_file_is_an_error_not_an_empty_preview() {
+    let repo = TempRepo::new("blob-missing");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+
+    let responses = serve(&format!(
+        "{}\n",
+        call_tool(
+            1,
+            "repoprism_blob",
+            serde_json::json!({ "path": repo.path_str(), "file": "nope.txt" })
+        )
+    ));
+
+    assert!(
+        responses[0]["result"].is_null() && responses[0]["error"]["code"].is_number(),
+        "『这个版本下没有这个文件』必须报错，不能降级成空预览，实际 {}",
+        responses[0]
+    );
 }
 
 #[test]

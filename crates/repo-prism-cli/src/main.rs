@@ -1,13 +1,16 @@
 //! `repoprism` —— 只读仓库智能工具的 CLI 出口。
 //!
-//! 三条数据命令（`inspect` / `commits` / `detail`）共用**同一个 JSON 信封**，
+//! 四条数据命令（`inspect` / `commits` / `detail` / `blob`）共用**同一个 JSON 信封**，
 //! 让 Agent 侧只需实现一次解析，也让 schema 演进有落脚点。
 //!
 //! `--json` 之外的输出是给人看的摘要：Agent 一律用 `--json`。
+//!
+//! `blob` 是唯一会读取文件内容的命令，因此它**显式保留**了 P-10 的「先量后读」：
+//! `--size-only` 只报大小、一个字节都不读。
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use repo_prism_core::Git;
+use repo_prism_core::{BlobKind, BlobPreview, Git, MAX_PREVIEW_BYTES};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -58,6 +61,25 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Print a file's content preview at a given revision
+    Blob {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Revision to read the file from
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+        /// Path of the file **inside** the repository
+        #[arg(long)]
+        file: String,
+        /// Report the size only and read no content (exactly one subprocess).
+        ///
+        /// 这是 P-10「先量后读」里「量」的那一半单独暴露成命令：
+        /// 调用方可以先花一次便宜的调用判断值不值得读。
+        #[arg(long)]
+        size_only: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage the bundled Agent Skill
     Skill {
         /// Print the path to the extracted skill directory
@@ -76,6 +98,15 @@ struct Envelope<T: Serialize> {
     tool: &'static str,
     tool_version: &'static str,
     data: T,
+}
+
+/// `blob --size-only` 的输出。带上限是为了让调用方**在读取之前**就能判断值不值得。
+#[derive(Serialize)]
+struct BlobSize<'a> {
+    rev: &'a str,
+    path: &'a str,
+    size: u64,
+    preview_cap_bytes: u64,
 }
 
 fn envelope<T: Serialize>(data: T) -> Envelope<T> {
@@ -151,6 +182,36 @@ fn main() -> Result<()> {
                 }
             })
         }
+        Commands::Blob {
+            path,
+            rev,
+            file,
+            size_only,
+            json,
+        } => {
+            let git = Git::open(&path)?;
+            if size_only {
+                let size = git.blob_size(&rev, &file)?.with_context(|| {
+                    format!("{rev}:{file} 在这个仓库里不存在（版本或路径不对）")
+                })?;
+                print_result(
+                    &BlobSize {
+                        rev: &rev,
+                        path: &file,
+                        size,
+                        preview_cap_bytes: MAX_PREVIEW_BYTES,
+                    },
+                    json,
+                    |s| {
+                        println!("blob: {} @ {}", s.path, s.rev);
+                        println!("size: {} 字节", s.size);
+                    },
+                )
+            } else {
+                let preview = git.blob_preview(&rev, &file)?;
+                print_result(&preview, json, |p| print_blob_human(&rev, &file, p))
+            }
+        }
         Commands::Skill { path, print } => {
             if print {
                 print!("{SKILL_MD}");
@@ -176,6 +237,52 @@ where
         human(data);
     }
     Ok(())
+}
+
+/// `blob` 的人类可读输出。
+///
+/// 刻意**不**把图片 base64 打到 stdout —— 那是给程序用的，人看一屏乱码没有意义，
+/// 而且会把终端塞满。这里只说清楚「它是什么、多大、怎么拿内容」。
+fn print_blob_human(rev: &str, file: &str, p: &BlobPreview) {
+    println!("blob: {file} @ {rev}");
+    println!("size: {} 字节", p.size);
+    match &p.kind {
+        BlobKind::Image { format } => {
+            println!("kind: image ({})", format.media_type());
+            println!("（图片内容以 base64 提供，加 --json 取用）");
+        }
+        BlobKind::Text => {
+            println!("kind: text");
+            if p.truncated {
+                println!("（文本预览已截断，加 --json 可看到截断标记）");
+            }
+            if let Some(text) = &p.text {
+                println!("\n{text}");
+            }
+        }
+        BlobKind::Binary => {
+            println!("kind: binary");
+            if p.truncated {
+                println!("（十六进制转储只显示前一段）");
+            }
+            if let Some(hex) = &p.hex {
+                println!("\n{hex}");
+            }
+        }
+        BlobKind::LfsPointer { oid, size } => {
+            println!("kind: lfs_pointer");
+            println!("oid: {oid}");
+            println!("真实大小: {size} 字节");
+            println!("（这是 LFS 指针本身，真实内容不在仓库里，也未下载）");
+        }
+        BlobKind::TooLarge => {
+            println!("kind: too_large");
+            println!(
+                "（超过 {} 字节读取上限，一个字节都没读；size 是它在仓库里的真实大小）",
+                MAX_PREVIEW_BYTES
+            );
+        }
+    }
 }
 
 /// SHA 截断显示。空 SHA（无提交仓库）返回 `(none)`，不做越界切片。

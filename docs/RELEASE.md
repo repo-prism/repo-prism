@@ -98,7 +98,7 @@ git push origin v0.3.0
 1. 下载三个平台的桌面安装包，各装一遍，打开仓库看四个视图是否正常
 2. 下载至少一个 CLI 二进制，`repoprism inspect . --json` 与 `repoprism skill --print` 各跑一次
 3. 下载一个 MCP 二进制，`echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | ./repoprism-mcp`
-   应列出 **5 个**工具名
+   应列出 **6 个**工具名
 4. 确认 Release 说明与 `CHANGELOG.md` 一致
 
 **未签名提示**：当前不做代码签名（缺 Apple Developer 证书与 Windows 代码签名证书），

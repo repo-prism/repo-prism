@@ -7,7 +7,7 @@
 //! （AGENTS.md 的目录职责表）。因此只读约束与 GUI / CLI 共用同一套实现。
 
 use anyhow::Result;
-use repo_prism_core::{ChangeAnalysis, Git, LineStats, RepoSet};
+use repo_prism_core::{ChangeAnalysis, Git, LineStats, RepoSet, MAX_PREVIEW_BYTES};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, OnceLock};
@@ -169,6 +169,20 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["path"]
             }
+        },
+        {
+            "name": "repoprism_blob",
+            "description": "Read a single file's content at a given revision, read-only. Returns its real size plus a kind: image (base64 payload), text, binary (hex dump), lfs_pointer (never fetched), or too_large (nothing was read). Set size_only to only measure the size and read no bytes at all.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to a local Git repository" },
+                    "rev": { "type": "string", "default": "HEAD", "description": "Revision to read the file from" },
+                    "file": { "type": "string", "description": "Path of the file inside the repository" },
+                    "size_only": { "type": "boolean", "default": false, "description": "Only report the size; read no content (one subprocess)" }
+                },
+                "required": ["path", "file"]
+            }
         }
     ])
 }
@@ -217,6 +231,35 @@ fn call_tool(params: &Value) -> Result<Value, RpcError> {
         "repoprism_remote" => {
             let path = arg_str(&args, "path")?;
             to_json_text(open(&path)?.remote_info().map_err(tool_failure)?)?
+        }
+        "repoprism_blob" => {
+            let path = arg_str(&args, "path")?;
+            let rev = args.get("rev").and_then(Value::as_str).unwrap_or("HEAD");
+            let file = arg_str(&args, "file")?;
+            let size_only = args
+                .get("size_only")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let git = open(&path)?;
+            if size_only {
+                // 「先量后读」里「量」的那一半：一个字节都不读。
+                let size = git
+                    .blob_size(rev, &file)
+                    .map_err(tool_failure)?
+                    .ok_or_else(|| {
+                        RpcError::invalid_params(format!(
+                            "{rev}:{file} 在这个仓库里不存在（版本或路径不对）"
+                        ))
+                    })?;
+                to_json_text(json!({
+                    "rev": rev,
+                    "path": file,
+                    "size": size,
+                    "preview_cap_bytes": MAX_PREVIEW_BYTES,
+                }))?
+            } else {
+                to_json_text(git.blob_preview(rev, &file).map_err(tool_failure)?)?
+            }
         }
         other => return Err(RpcError::method_not_found(other)),
     };

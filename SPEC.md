@@ -153,10 +153,27 @@ inline SVG 会执行其中的脚本与事件处理器。所有文案走文本节
 repoprism inspect . --json       # [已实现] 输出 JSON 快照（信封见下）
 repoprism commits . --json       # [已实现] 输出提交历史，--limit 上限 2000
 repoprism detail . --sha <sha> --json  # [已实现] 输出提交详情与原始 diff
+repoprism blob . --file <path> [--rev <rev>] [--size-only] [--json]  # [已实现] 文件内容只读预览
 repoprism skill --path           # [已实现] 展开 Skill 到缓存目录并打印路径
 repoprism skill --print          # [已实现] 直接打印 Skill 内容
-repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指定视图
+repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指定视图（前置条件见下）
 ```
+
+`blob` 是唯一会读文件内容的命令，因此它**显式保留**了「先量后读」：
+`--size-only` 只报大小（1 次子进程），一个字节都不读；
+不加它则先量大小再决定读不读（2 次，超过 4 MiB 时退化为 1 次且不读）。
+
+**`open --view` 为什么还没做**（工程补丁 P-11 的裁决，不是遗漏）：
+
+| 前置条件 | 现状 |
+|---------|------|
+| 桌面应用必须**真的可安装** | v0.2.0 / v0.3.0 两个 Release 仍是 **draft**，从未发布 ⇒ 没有任何一台机器装过它 |
+| 应用要能接受「定位到哪个视图」的参数 | 需要单实例 + 参数转发，Tauri 不自带；**应用侧的工作量比 CLI 侧大** |
+| 应用的标识必须定下来 | `tauri.conf.json` 的 `productName` 仍是 `repoprism-app`（命名由人类主导，未定） |
+
+三条里任何一条不满足，写出来的 `open` 都只能在「应用未安装」这条路径上被验证 ——
+成功路径在本机**永远跑不到**。因此这里选择：**先不实现，把前置条件写在这里**。
+三条都满足后（发布完成、命名定下、应用侧接受参数），它是一个几十行的子命令。
 
 所有 `--json` 输出共用同一信封，Agent 只需实现一次解析：
 
@@ -179,9 +196,12 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 `[已实现]` Claude Desktop / Cursor 通过 MCP 协议读取仓库状态。
 
 - stdio 传输，JSON-RPC 2.0，newline-delimited
-- 五个只读工具：
+- 六个只读工具：
   `repoprism_inspect` / `repoprism_commits` / `repoprism_detail` /
-  `repoprism_analyze` / `repoprism_remote`
+  `repoprism_analyze` / `repoprism_remote` / `repoprism_blob`
+- `repoprism_blob` 是其中唯一会读**文件内容**的，因此它保留与桌面端、
+  CLI 同一套「先量后读」契约：`size_only` 为真时只报大小（1 次子进程），
+  一个字节都不读
 - `tools/call` 结果放在 `content[0].text`，且 `text` **必须是字符串**
 - 错误码分层：未知方法 `-32601`、参数缺失或非法 `-32602`；
   不得把「参数错」与「服务端内部错」压成同一个码
@@ -264,6 +284,17 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 ### US-10：PR/MR 只读视图（P2）
 
 `[待实现]` 通过 `gh` CLI 或 API 只读展示 PR 状态、评审、CI 结果。
+
+> **为什么还没做 —— 见 [`ADR/003`](ADR/003-pr-view-egress-boundary.md)。**
+> 这是本项目第一个「读的数据不在本地」的功能，会带来第一次**非回环出网**与凭据，
+> 与本节「出网｜唯一出网点是回环地址」直接冲突。ADR-003 实测了两条路径各自
+> 的验证缺口，并定下了「无论走哪条路都必须满足的边界」；是否实现由人决定。
+> 两条最要紧的实测结论：
+> - 本机没有 `gh`（`which gh` → not found）⇒ `gh` 路线在这里**一次都跑不了**；
+> - 现有只读扫描器对 `Command::new("gh")` **7 个写子命令只拦住 1 个**
+>   （`merge`，而且是巧合——它恰好也在 Git 的写动词表里）；
+>   `comment` / `review --approve` / `close` / `edit` / `release create` /
+>   `repo delete` 全部放行。
 
 ---
 
@@ -389,7 +420,7 @@ repoprism open . --view changes  # [待实现] 打开桌面应用并定位到指
 | 提交详情   | `git show --stat`           | P0     | 已实现     |
 | CLI JSON   | core 直接输出               | P0     | 已实现     |
 | Skill      | CLI 包装                    | P1     | 已实现     |
-| MCP Server | core 直接输出（5 个工具）     | P1     | 已实现     |
+| MCP Server | core 直接输出（6 个工具）     | P1     | 已实现     |
 | LLM 摘要   | 本地模型（Ollama，回环地址）  | P1     | 已实现（默认关闭） |
 | 虚拟滚动   | 前端渲染层，无新增数据源      | P0     | 已实现     |
 | 图片对比与预览 | `cat-file blob` + 魔法字节识别       | P0     | 已实现     |

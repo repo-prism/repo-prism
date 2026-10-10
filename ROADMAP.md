@@ -77,6 +77,7 @@
 | [P-07](TASKS/patch/P-07-http-path-coverage.md) | 本地模型 HTTP 路径用回环 stub 变实（原防线从未运行过） | ✅ 2026-10-09 |
 | [P-09](TASKS/patch/P-09-worktree-stash-state.md) | 补全 US-1 缺口：worktree / stash 列表 + 进行中操作状态（**零子进程**探测） | ✅ 2026-10-09 |
 | [P-10](TASKS/patch/P-10-blob-preview.md) | 补全 US-3 缺口：blob 只读预览（图片对比 / 十六进制转储 / LFS 指针识别） | ✅ 2026-10-10 |
+| [P-11](TASKS/patch/P-11-blob-in-cli-and-mcp.md) | 把 P-10 的边界接到 CLI 与 MCP（`blob_size()` 的第一个生产调用方）+ 补 `BlobPreview` 的线格式测试 + 裁决 `open --view` | ✅ 2026-10-10 |
 
 ---
 
@@ -88,10 +89,11 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **213 passed**（core 183 / CLI 14 / MCP 16）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故按包跑后加总 |
+| Rust 测试 | `cargo test --workspace` | ✅ **230 passed**（core 187 / CLI 22 / MCP 21）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故**逐测试目标**跑后加总（P-11 这次整包跑仍吃了 137） |
 | 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7）。**该门禁在 TASK-018 与 P-09 里都一字未改** —— 缓存是 opt-in、状态探测是文件探测，两条都不给快照加子进程，见下 |
 | 引用缓存失效（`TASK-018`） | `cargo test -p repo-prism-core --test cache` | ✅ **12 passed**：1 条「缓存确实命中」+ 7 条「引用一变必须失效」+ 4 条边界（工作区状态从不缓存 / 不开启时行为不变 / 链接工作树 / 分支改名）。失败路径由 6 个探针反证 |
 | 工作区状态与列表（P-09） | `cargo test -p repo-prism-core --test workspace` | ✅ **11 passed**：真实 git 造出冲突合并 / 变基（含进度）/ 摘取 / 回退 / 二分 / 链接工作树 / stash，逐项断言。另含 lib 内 14 条纯函数单测（`state_from_markers` / `parse_worktrees` / `parse_stashes`）。Rust 侧 9 条 + 前端侧 4 条失败路径探针全部反证通过 |
+| blob 只读预览（P-10 + P-11） | `cargo test -p repo-prism-core --test preview` / `-p repo-prism-cli --test blob` / `-p repo-prism-mcp --test protocol` | ✅ **17 + 8 + 5 = 30 passed**。P-10 那 13 项钉的是 Rust 结构（真的 `git add` 二进制再读回来）；**P-11 补的 4 项钉的是 JSON 线格式** —— 此前无人断言，而桌面端 / CLI / MCP 三处拿到的都是 JSON，前端 `src/lib/api.ts` 那份 `BlobKind` 是手写的。现在改 `rename_all` 或字段名会让 Rust 侧红 |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 37 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
@@ -103,12 +105,14 @@
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`f485c20`（TASK-019）→ run **38021645850**，**6 腿全 success**。三平台 `test` 步全 success ⇒ **TASK-019 新增的 `tests/sessions.rs`（15 项）与 MCP 的两个新用例在 macos / ubuntu / windows 上都真跑过**。新增的 `pnpm check:commands` 步骤（前端 job，第 9 步）也是 success —— 这条新闸门在 CI 上确实执行了，不是只在本地绿。<br>上一次：`f8e9e59`（P-10）→ run **38015706569**，**6 腿全 success**：Read-only Guard（自检 + 扫描）/ Frontend（lint / typecheck / test / build / release:dry）/ Rust×3（fmt / clippy / test 在三平台全 success）/ Performance。`test` 步骤在 macos 02:07:21、ubuntu 02:07:11、windows 02:08:04 都是 success —— **P-10 新增的 `tests/preview.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标），也就是说那 13 项「真的 `git add` 二进制再读回来」的用例不是只在本机绿。<br>上一次：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ **最近一次**：tag `v0.3.0`（打在 `cfc20a9`）→ run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4）。cli 与 mcp-binaries 的 8 条腿全部 `cargo build --release --locked` 通过 ⇒ **`Cargo.lock` 与 0.3.0 同步**。产物是 **draft**：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0（与 v0.2.0 同样），**11 个附件是否齐全只能登录后核验**。新观察到一条 notice：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，之后首次发布需重验 Linux 安装包。<br>上一次：tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（12 腿全 success）。<br>**两个 draft 都还没被人工点发布**（v0.2.0 自 2026-10-09、v0.3.0 自 2026-10-10） |
 
-**core 183 项的构成**：lib 70（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
-`parse_head_meta`，P-09 新增的状态探测与列表解析纯函数 +14，
-P-10 的类型判据与转储 +11，TASK-019 的 `RepoSet` 边界 +3）/ analysis 5 /
-diff 10 / perf 2 / remote 5 / snapshot 16 / `summarizer_http` 8（P-07）/
-`summarizer_egress` 1 + `summarizer_contract` 4（P-08）/ `cache` 12（TASK-018）/
-`workspace` 11（P-09）/ `preview` 13（P-10）/ **`sessions` 15（TASK-019）**。
+**core 187 项的构成**：lib 81 / analysis 5 / diff 10 / perf 2 / remote 5 /
+snapshot 16 / `summarizer_http` 8（P-07）/ `summarizer_egress` 1 +
+`summarizer_contract` 4（P-08）/ `cache` 12（TASK-018）/ `workspace` 11（P-09）/
+**`preview` 17（P-10 的 13 + P-11 的线格式 4）** / `sessions` 15（TASK-019）。
+
+> 上一版这里写的是「lib 70 / preview 13 / 合计 183」。实测 lib 是 **81**
+> （不是 70）—— 那行是手数时漏计，P-11 这次按 `cargo test` 的逐目标输出重算并更正。
+> 合计从 183 到 187 的 +4 全部来自 P-11 的线格式测试。
 
 **TASK-019 的 spawn 契约**：`snapshot()` 首次 2 次、之后 1 次（会话是 `open_cached` 的）；
 「恰好 2 次」那条**与状态无关**的契约由 `perf.rs` 用**不缓存**的 `Git::open` 钉住。
@@ -175,13 +179,13 @@ CI runner 无此问题，故未改项目配置。
 | US-1 仓库状态（分支 / HEAD / 标签 / 提交图 / 上游计数 / 进行中操作 / worktree / stash） | ✅ 已实现（P-09 补齐最后一条缺口） |
 | US-2 变更分组 + 风险角标 | ✅ 已实现 |
 | US-3 提交详情 + Diff（统一 / 并排，含原始行号，`patch` 原文） | ✅ 已实现（含图片对比与字节预览；**音视频播放**仍 `[待实现]`，理由见 SPEC） |
-| US-4 CLI（`inspect` / `commits` / `detail` / `skill` + schema 信封） | ✅ 已实现（`open --view` 待实现） |
+| US-4 CLI（`inspect` / `commits` / `detail` / `blob` / `skill` + schema 信封） | ✅ 已实现（`open --view` **明确延后**，三条前置条件见 `SPEC.md` US-4） |
 | US-5 Agent Skill | ✅ 已实现 |
-| US-6 MCP Server（5 个只读工具） | ✅ 已实现 |
+| US-6 MCP Server（**6** 个只读工具） | ✅ 已实现（P-11 加 `repoprism_blob`） |
 | US-7 AI 变更摘要 | ✅ 已实现（本地 10 条规则 + 可选本地模型层，默认关闭）<br>⚠️ 模型层的真实调用未端到端验证（本机无 Ollama） |
 | US-8 一键跳转集成 | ✅ 已实现 |
 | US-9 多仓库工作区 | ✅ 已实现（TASK-019） |
-| US-10 PR/MR 只读视图 | ❌ 未实现（TASK-020） |
+| US-10 PR/MR 只读视图 | ❌ 未实现（TASK-020）——**不是遗漏**：边界与验证缺口见 [`ADR/003`](ADR/003-pr-view-egress-boundary.md)，是否实现待定 |
 
 ---
 
@@ -212,6 +216,11 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
 4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界。
    **这是 SPEC 里最后一张 P2 卡**：做完之后 US-1~US-10 全部 `[已实现]`（US-3 的音视频播放与
    US-7 的真实模型验证另算，前者是刻意留的、后者卡在环境）
+   **2026-10-10**：边界问题已写进 [`ADR/003`](ADR/003-pr-view-egress-boundary.md)（状态：提案）。
+   两条实测结论决定了它现在不该动手 —— 本机没有 `gh`（`gh` 路线一次都跑不了）；
+   现有只读扫描器对 `Command::new("gh")` **7 个写子命令只拦住 1 个**（`merge`，
+   且是巧合）。ADR 第四节定了「无论走哪条路都必须满足的 7 条边界」，
+   第五节留了 A / B / C 三个选项**待人批准**
 
 补丁序列在 TASK-018 之后又补了一张 [P-09](TASKS/patch/P-09-worktree-stash-state.md)：
 US-1 里那条「worktree / stash / 合并变基状态」在 SPEC 中标 **P0**，却**从未被分配卡号**
@@ -224,6 +233,13 @@ US-1 里那条「worktree / stash / 合并变基状态」在 SPEC 中标 **P0**�
 **最后一条未实现的 P0**。它开的是一条**此前不存在**的边界 —— 项目此前从不读取
 blob 内容（`FileStat.binary` 只标记不读），所以「只读」这次要从「不执行写命令」
 推进到「读也要先量再读」。做完之后，v0.3 剩下的 P0 一条都没有了。
+
+[P-11](TASKS/patch/P-11-blob-in-cli-and-mcp.md) 是 P-10 的**收口**：那条边界当时只
+建在桌面端 —— `blob_size()` / `blob_preview()` 只有 Tauri 在调，`blob_size()` 更是
+**只有测试在调**。P-11 把它接到 CLI（`repoprism blob`）与 MCP（第 6 个工具），
+并顺手补上了 P-10 漏掉的一类测试：**`BlobPreview` 的 JSON 线格式此前无人断言**，
+而三处消费者拿到的都是 JSON。同一张卡还裁决了 `repoprism open --view`：
+不实现，但把三条前置条件写进 SPEC，而不是让它继续看起来像「忘了」。
 
 ### 发布收尾（v0.2.0 / v0.3.0 两个 draft 都卡在这一步）
 

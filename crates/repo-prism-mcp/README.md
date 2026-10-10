@@ -48,8 +48,15 @@ cargo build -p repo-prism-mcp --release
 | `repoprism_detail(path, sha)` | 提交详情与原始 diff |
 | `repoprism_analyze(path)` | 未提交改动的本地风险分析（纯本地规则，不调模型、不联网） |
 | `repoprism_remote(path)` | `origin` 的结构化 host / owner / repo / url；无 remote 时为 `null` |
+| `repoprism_blob(path, file, rev?, size_only?)` | 某个版本下单个文件的内容预览；`size_only` 为真时只报大小、不读内容 |
 
 `tools/call` 的返回值放在 `content[0].text` 里，是一个 JSON 值。
+
+`repoprism_blob` 返回的 `kind` 是带 tag 的枚举，**线上形状是嵌套的**
+（`kind.kind` 才是 `"text"` / `"image"` / …）。图片类给 `content`（base64），
+文本类给 `text`，认不出的二进制给 `hex`，LFS 指针只给 `oid` 与真实大小
+（**内容从未下载**）。注意 `size` 有两个：外层是**仓库里那个文件**的字节数，
+LFS 指针里那个是**它指向的对象**的大小 —— 两者不是一回事。
 
 `repoprism_analyze` 返回的 `risks[]` 每条含 `rule_id` / `level` / `message` / `path`，
 `by_level` 是三个等级的计数 —— Agent 可据此决定先看哪个文件。

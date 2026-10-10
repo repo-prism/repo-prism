@@ -44,7 +44,10 @@ const REF_FINGERPRINT_BUDGET: usize = 4 * 1024 * 1024;
 // 另两个守的是 IPC 载荷与 UI 渲染。
 
 /// **读取**上限。超过就一个字节都不读，只报真实大小。
-const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
+///
+/// 对外可见（P-11）：CLI 与 MCP 在输出里要报「上限是多少」，
+/// 各处硬编码一份 `4 MiB` 就会和这里悄悄分叉。
+pub const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
 
 /// **文本呈现**上限。超出即 `truncated`（落在字符边界上）。
 const MAX_PREVIEW_TEXT_BYTES: usize = 256 * 1024;

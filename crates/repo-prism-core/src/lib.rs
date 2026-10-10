@@ -15,7 +15,7 @@ pub use analysis::{
     ChangeAnalysis, ChangeFacts, ChangeGroup, NoopSummarizer, Risk, RiskCounts, RiskLevel,
     Summarizer,
 };
-pub use git::Git;
+pub use git::{Git, MAX_PREVIEW_BYTES};
 pub use model::*;
 pub use sessions::{RepoSet, DEFAULT_CAP};
 pub use summarizer::{

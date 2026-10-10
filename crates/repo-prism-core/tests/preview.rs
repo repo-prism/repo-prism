@@ -466,3 +466,134 @@ fn a_missing_path_and_a_dangerous_version_are_rejected_outright() {
     );
     assert!(git.blob_preview(&head, "").is_err(), "空路径必须拒绝");
 }
+
+// --- 线格式（P-11）---------------------------------------------------------
+// P-10 只测了 Rust 结构，**没有任何测试断言过它的 JSON 形状**，
+// 而桌面端 / CLI / MCP 三处消费者拿到的都是 JSON。
+// 前端的 `src/lib/api.ts` 里那份 `BlobKind` 是手写的，与 serde 之间没有编译期联系：
+// 改一个 `rename_all` 或一个字段名，Rust 测试全绿、UI 静默变空白。
+// 下面几条把线上形状钉住，让这类漂移至少在 Rust 侧会红。
+
+#[test]
+fn every_kind_carries_a_snake_case_tag_on_the_wire() {
+    let cases = [
+        (
+            BlobKind::Image {
+                format: ImageFormat::Png,
+            },
+            "image",
+        ),
+        (BlobKind::Text, "text"),
+        (BlobKind::Binary, "binary"),
+        (
+            BlobKind::LfsPointer {
+                oid: "abc".to_string(),
+                size: 1,
+            },
+            "lfs_pointer",
+        ),
+        (BlobKind::TooLarge, "too_large"),
+    ];
+
+    for (kind, tag) in cases {
+        let value = serde_json::to_value(&kind).expect("serialize");
+        assert_eq!(
+            value["kind"], tag,
+            "tag 的形状由 rename_all 决定，前端按它 switch，实际 {value}"
+        );
+    }
+}
+
+#[test]
+fn a_preview_serializes_to_a_flat_envelope_with_a_nested_kind() {
+    let repo = TempRepo::new("preview-wire-text");
+    repo.write("a.txt", "hello\n");
+    repo.commit("c1");
+
+    let git = Git::open(repo.path()).expect("open repo");
+    let preview = git.blob_preview("HEAD", "a.txt").expect("preview");
+    let value = serde_json::to_value(&preview).expect("serialize");
+
+    // `Value::Object` 是 BTreeMap，键是字母序而不是声明序（与 `to_string` 不同），
+    // 所以这里断言的是**集合**而不是顺序 —— 顺序本来也不该被依赖。
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .expect("object")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec![
+            "content",
+            "hex",
+            "kind",
+            "size",
+            "text",
+            "too_large",
+            "truncated"
+        ],
+        "字段集合变了就是 breaking change（前端按名字取值），实际 {keys:?}"
+    );
+    assert!(
+        value["kind"].is_object(),
+        "kind 是带 tag 的枚举，线上是**嵌套对象**（`kind.kind`），实际 {value}"
+    );
+}
+
+#[test]
+fn an_image_preview_carries_base64_under_content() {
+    let repo = TempRepo::new("preview-wire-image");
+    repo.write_bytes("pic.png", &png_bytes(0x33));
+    repo.commit("c1");
+
+    let git = Git::open(repo.path()).expect("open repo");
+    let preview = git.blob_preview("HEAD", "pic.png").expect("preview");
+    let value = serde_json::to_value(&preview).expect("serialize");
+
+    assert_eq!(value["kind"]["kind"], "image");
+    assert_eq!(value["kind"]["format"], "png");
+    let b64 = value["content"].as_str().expect("content 应为字符串");
+    assert!(
+        base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .is_ok(),
+        "content 必须是可解码的 base64，否则前端拼出的 data URL 渲染不出来"
+    );
+    assert!(
+        value["text"].is_null() && value["hex"].is_null(),
+        "图片不给文本与转储"
+    );
+}
+
+#[test]
+fn a_preview_round_trips_through_json_without_losing_a_field() {
+    let repo = TempRepo::new("preview-wire-roundtrip");
+    let pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\nsize 12345\n";
+    repo.write_bytes("huge.bin", pointer);
+    repo.commit("c1");
+
+    let git = Git::open(repo.path()).expect("open repo");
+    let preview = git.blob_preview("HEAD", "huge.bin").expect("preview");
+
+    let text = serde_json::to_string(&preview).expect("serialize");
+    let back: repo_prism_core::BlobPreview = serde_json::from_str(&text).expect("deserialize");
+    assert_eq!(
+        back, preview,
+        "序列化必须无损：丢一个字段，另一端的『没读到』就变成『读到了空』"
+    );
+
+    // 顺带钉住那两个同名的 size —— 它们**不是**一回事，名字相同纯属历史形状。
+    let value = serde_json::to_value(&preview).expect("serialize");
+    assert_eq!(
+        value["size"],
+        pointer.len() as u64,
+        "外层是**指针文件**的大小"
+    );
+    assert_eq!(value["kind"]["size"], 12_345, "内层是 LFS **对象**的大小");
+    assert_ne!(
+        value["size"], value["kind"]["size"],
+        "两者相等反而说明形状错了"
+    );
+}
