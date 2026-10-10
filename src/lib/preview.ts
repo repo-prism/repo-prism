@@ -1,4 +1,16 @@
 import type { BlobKind, BlobPreview, ChangeKind, ImageFormat } from "./api";
+import { MAX_PREVIEW_BYTES } from "./blobPreview";
+
+/**
+ * 把字节上限显示成人能读的形式：`4194304` → `4 MiB`。
+ *
+ * 参数而不是写死的字符串：上限值本身与 Rust 的 `MAX_PREVIEW_BYTES`
+ * 由 contract 闸门对着管（补丁 P-12），文案要跟着它变。
+ */
+export function formatByteLimit(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB`;
+}
 
 /**
  * `<img>` 需要的 MIME 类型（US-3，补丁 P-10）。
@@ -61,7 +73,7 @@ export function kindLabel(kind: BlobKind): string {
  */
 export function previewNotice(preview: BlobPreview): string | null {
   if (preview.too_large) {
-    return "这个文件超过 4 MiB 的预览上限，内容没有被读取（只取了大小）。";
+    return `这个文件超过 ${formatByteLimit(MAX_PREVIEW_BYTES)} 的预览上限，内容没有被读取（只取了大小）。`;
   }
   if (preview.kind.kind === "lfs_pointer") {
     return "这是一个 Git LFS 指针：真实内容不在仓库里，也没有被下载。";

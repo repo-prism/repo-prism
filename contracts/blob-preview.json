@@ -1,0 +1,166 @@
+{
+  "_": {
+    "readme": "本文件由 cargo test -p repo-prism-core --test wire_contract -- --ignored 生成，请勿手改。它是 Rust 的 serde 形状与 TypeScript 侧类型之间的唯一事实来源。",
+    "rust_type": "repo_prism_core::BlobPreview",
+    "ts_type": "src/lib/blobPreview.ts"
+  },
+  "fields": [
+    "content",
+    "hex",
+    "kind",
+    "size",
+    "text",
+    "too_large",
+    "truncated"
+  ],
+  "image_formats": [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+    "bmp",
+    "svg"
+  ],
+  "kinds": {
+    "binary": {
+      "props": [
+        "kind"
+      ]
+    },
+    "image": {
+      "props": [
+        "format",
+        "kind"
+      ]
+    },
+    "lfs_pointer": {
+      "props": [
+        "kind",
+        "oid",
+        "size"
+      ]
+    },
+    "text": {
+      "props": [
+        "kind"
+      ]
+    },
+    "too_large": {
+      "props": [
+        "kind"
+      ]
+    }
+  },
+  "max_preview_bytes": 4194304,
+  "samples": [
+    {
+      "expect_tag": "image",
+      "name": "image/png",
+      "value": {
+        "content": "iVBORw0KGgo=",
+        "hex": null,
+        "kind": {
+          "format": "png",
+          "kind": "image"
+        },
+        "size": 137,
+        "text": null,
+        "too_large": false,
+        "truncated": false
+      }
+    },
+    {
+      "expect_tag": "image",
+      "name": "image/svg",
+      "value": {
+        "content": "PHN2Zy8+",
+        "hex": null,
+        "kind": {
+          "format": "svg",
+          "kind": "image"
+        },
+        "size": 9,
+        "text": null,
+        "too_large": false,
+        "truncated": false
+      }
+    },
+    {
+      "expect_tag": "text",
+      "name": "text",
+      "value": {
+        "content": null,
+        "hex": null,
+        "kind": {
+          "kind": "text"
+        },
+        "size": 11,
+        "text": "hello blob\n",
+        "too_large": false,
+        "truncated": false
+      }
+    },
+    {
+      "expect_tag": "text",
+      "name": "text/truncated",
+      "value": {
+        "content": null,
+        "hex": null,
+        "kind": {
+          "kind": "text"
+        },
+        "size": 9999,
+        "text": "前一部分\n",
+        "too_large": false,
+        "truncated": true
+      }
+    },
+    {
+      "expect_tag": "binary",
+      "name": "binary",
+      "value": {
+        "content": null,
+        "hex": "00000000  68 65 6c 6c 6f",
+        "kind": {
+          "kind": "binary"
+        },
+        "size": 5,
+        "text": null,
+        "too_large": false,
+        "truncated": false
+      }
+    },
+    {
+      "expect_tag": "lfs_pointer",
+      "name": "lfs_pointer",
+      "value": {
+        "content": null,
+        "hex": null,
+        "kind": {
+          "kind": "lfs_pointer",
+          "oid": "4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393",
+          "size": 12345
+        },
+        "size": 130,
+        "text": null,
+        "too_large": false,
+        "truncated": false
+      }
+    },
+    {
+      "expect_tag": "too_large",
+      "name": "too_large",
+      "value": {
+        "content": null,
+        "hex": null,
+        "kind": {
+          "kind": "too_large"
+        },
+        "size": 4194305,
+        "text": null,
+        "too_large": true,
+        "truncated": false
+      }
+    }
+  ]
+}

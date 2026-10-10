@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- **跨语言线格式闸门**（工程补丁 P-12）
+  - `BlobPreview` 的 JSON 是三处消费者的共同契约（桌面端 / CLI / MCP），而前端
+    `src/lib/api.ts` 里那份类型是**手抄**的 —— 双方没有编译期联系。P-11 补的 Rust 侧
+    线格式测试拦得住「Rust 序列化成什么」，拦不住「前端那份已经跟 Rust 分叉了」
+  - 现在有一份唯一事实来源 `contracts/blob-preview.json`：由 Rust 侧生成，
+    由 `src/lib/blobPreview.test.ts` 逐项比对。改任意一侧，另一侧会红
+  - 更新 contract 文件需要明确执行一条 `--ignored` 的 Rust 用例 —— **CI 不会替你更新**
+  - 顺手修掉一处真实分叉：界面上那句「超过 4 MiB」此前是硬编码的，与 Rust 的
+    `MAX_PREVIEW_BYTES` 是两个独立的数。现在由同一个值派生
+- **严格解析器 `parseBlobPreview`**：`getBlobPreview` 的必经路径。契约破时抛
+  `WireContractError`，面板把它显示成一行提示，而不是静默渲染出一块空白。
+  那条字段清单不是注释，是运行时判据 —— 注释会过时，代码不会
+
 ## [0.4.0] - 2026-10-10
 
 **v0.4.0 收掉 US-9（多仓库）**，并把 v0.3.0 只建在桌面端的 blob 只读预览铺到

@@ -81,6 +81,7 @@
 | [P-09](TASKS/patch/P-09-worktree-stash-state.md) | 补全 US-1 缺口：worktree / stash 列表 + 进行中操作状态（**零子进程**探测） | ✅ 2026-10-09 |
 | [P-10](TASKS/patch/P-10-blob-preview.md) | 补全 US-3 缺口：blob 只读预览（图片对比 / 十六进制转储 / LFS 指针识别） | ✅ 2026-10-10 |
 | [P-11](TASKS/patch/P-11-blob-in-cli-and-mcp.md) | 把 P-10 的边界接到 CLI 与 MCP（`blob_size()` 的第一个生产调用方）+ 补 `BlobPreview` 的线格式测试 + 裁决 `open --view` | ✅ 2026-10-10 |
+| [P-12](TASKS/patch/P-12-wire-contract.md) | 跨语言线格式闸门：`BlobPreview` 的 JSON 形状由 `contracts/blob-preview.json` 单边持有，Rust 与 TS 两侧对着它 —— 补 P-11 写下的未覆盖项 | ✅ 2026-10-10 |
 
 ---
 
@@ -92,7 +93,7 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **230 passed**（core 187 / CLI 22 / MCP 21）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故**逐测试目标**跑后加总（P-11 这次整包跑仍吃了 137） |
+| Rust 测试 | `cargo test --workspace` | ✅ **231 passed**（core 188 / CLI 22 / MCP 21）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故**逐测试目标**跑后加总（P-11 这次整包跑仍吃了 137） |
 | 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7）。**该门禁在 TASK-018 与 P-09 里都一字未改** —— 缓存是 opt-in、状态探测是文件探测，两条都不给快照加子进程，见下 |
 | 引用缓存失效（`TASK-018`） | `cargo test -p repo-prism-core --test cache` | ✅ **12 passed**：1 条「缓存确实命中」+ 7 条「引用一变必须失效」+ 4 条边界（工作区状态从不缓存 / 不开启时行为不变 / 链接工作树 / 分支改名）。失败路径由 6 个探针反证 |
 | 工作区状态与列表（P-09） | `cargo test -p repo-prism-core --test workspace` | ✅ **11 passed**：真实 git 造出冲突合并 / 变基（含进度）/ 摘取 / 回退 / 二分 / 链接工作树 / stash，逐项断言。另含 lib 内 14 条纯函数单测（`state_from_markers` / `parse_worktrees` / `parse_stashes`）。Rust 侧 9 条 + 前端侧 4 条失败路径探针全部反证通过 |
@@ -100,22 +101,24 @@
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
 | 前端 lint | `biome check src` | ✅ 37 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
-| 前端测试 | `vitest run` | ✅ 84 passed（8 files；`workspace.test.ts` 14 / `preview.test.ts` 16 / `repo.test.ts` 16） |
-| 前端构建 | `vite build` | ✅ `dist/assets/index-B0YoM7yn.js` 252.72 kB（gzip 78.91 kB） |
+| 前端测试 | `vitest run` | ✅ **100 passed**（9 files；`workspace.test.ts` 14 / `preview.test.ts` 16 / `repo.test.ts` 16 / **`blobPreview.test.ts` 16**（P-12）） |
+| 前端构建 | `vite build` | ✅ `dist/assets/index-CDV5vqAc.js` 255.07 kB（gzip 79.79 kB）。P-12 新增的解析器进了 bundle（+2.35 kB） |
 | 命令名一致性 | `pnpm check:commands` | ✅ 前端 `invoke` 16 个 ↔ 后端 `generate_handler!` 16 个。失败路径已实测（改名即 rc=1） |
+| 跨语言线格式 | `tests/wire_contract.rs` + `blobPreview.test.ts` | ✅ **`contracts/blob-preview.json` 由 Rust 侧生成、由 TS 侧比对**，四个漂移方向都能红。探针 **12/12 会红**（R 类走两环：Rust 先红 → 重生成 → TS 红）。更新 contract 的那条 Rust 用例是 `#[ignore]`，CI 不会替你更新 |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.4.0`（v0.4.0 发版前）。两条失败路径都当场复验：`--expect 0.3.0` → rc=1、`--expect-ref refs/tags/v0.3.0` → rc=1；正向 `--expect-ref refs/tags/v0.4.0` → rc=0 |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`bdc680e`（v0.4.0 发版）→ run **38029659530**，**6 腿全 success**（墙钟 1m45s）。这是**发版提交**上的那次：Frontend 里 `Run pnpm release:dry` 在 0.4.0 上 success ⇒ 三处版本声明 + `Cargo.lock` 在 CI 侧也是一致的（不只是本机）。<br>上一次：`7ffaa9b`（P-11）→ run **38027927882**，**6 腿全 success**（墙钟约 2m05s，最长腿 windows-latest 2m02s）。三平台 `test` 步全 success ⇒ **P-11 新增的 `crates/repo-prism-cli/tests/blob.rs`（8 项）、`tests/preview.rs` 的 4 项线格式测试与 MCP 的 5 项 blob 用例在 macos / ubuntu / windows 上都真跑过**（`cargo test --workspace` 不筛目标）。<br>上一次：`f485c20`（TASK-019）→ run **38021645850**，**6 腿全 success**。三平台 `test` 步全 success ⇒ **TASK-019 新增的 `tests/sessions.rs`（15 项）与 MCP 的两个新用例在 macos / ubuntu / windows 上都真跑过**。新增的 `pnpm check:commands` 步骤（前端 job，第 9 步）也是 success —— 这条新闸门在 CI 上确实执行了，不是只在本地绿。<br>上一次：`f8e9e59`（P-10）→ run **38015706569**，**6 腿全 success**：Read-only Guard（自检 + 扫描）/ Frontend（lint / typecheck / test / build / release:dry）/ Rust×3（fmt / clippy / test 在三平台全 success）/ Performance。`test` 步骤在 macos 02:07:21、ubuntu 02:07:11、windows 02:08:04 都是 success —— **P-10 新增的 `tests/preview.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标），也就是说那 13 项「真的 `git add` 二进制再读回来」的用例不是只在本机绿。<br>上一次：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ **最近一次**：tag `v0.3.0`（打在 `cfc20a9`）→ run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4）。cli 与 mcp-binaries 的 8 条腿全部 `cargo build --release --locked` 通过 ⇒ **`Cargo.lock` 与 0.3.0 同步**。产物是 **draft**：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0（与 v0.2.0 同样），**11 个附件是否齐全只能登录后核验**。新观察到一条 notice：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，之后首次发布需重验 Linux 安装包。<br>上一次：tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（12 腿全 success）。<br>**两个 draft 都还没被人工点发布**（v0.2.0 自 2026-10-09、v0.3.0 自 2026-10-10） |
 
-**core 187 项的构成**：lib 81 / analysis 5 / diff 10 / perf 2 / remote 5 /
+**core 188 项的构成**：lib 81 / analysis 5 / diff 10 / perf 2 / remote 5 /
 snapshot 16 / `summarizer_http` 8（P-07）/ `summarizer_egress` 1 +
 `summarizer_contract` 4（P-08）/ `cache` 12（TASK-018）/ `workspace` 11（P-09）/
-**`preview` 17（P-10 的 13 + P-11 的线格式 4）** / `sessions` 15（TASK-019）。
+**`preview` 17（P-10 的 13 + P-11 的线格式 4）** / `sessions` 15（TASK-019）/
+**`wire_contract` 1（P-12，另有 1 条 `#[ignore]` 的重生成用例不计入）**。
 
 > 上一版这里写的是「lib 70 / preview 13 / 合计 183」。实测 lib 是 **81**
 > （不是 70）—— 那行是手数时漏计，P-11 这次按 `cargo test` 的逐目标输出重算并更正。
-> 合计从 183 到 187 的 +4 全部来自 P-11 的线格式测试。
+> 183 → 187 的 +4 来自 P-11 的线格式测试，187 → 188 的 +1 来自 P-12 的 contract 校验。
 
 **TASK-019 的 spawn 契约**：`snapshot()` 首次 2 次、之后 1 次（会话是 `open_cached` 的）；
 「恰好 2 次」那条**与状态无关**的契约由 `perf.rs` 用**不缓存**的 `Git::open` 钉住。
