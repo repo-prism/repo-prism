@@ -125,14 +125,19 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 
 | 版本 | 日期 | tag | 内容 |
 |------|------|-----|------|
-| 0.3.0 | 2026-10-10 | `v0.3.0` | `TASK-018` + `P-07` / `P-08` / `P-09` / `P-10`：引用缓存、本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、**blob 只读预览**（图片对比 / 字节预览 / 按版本看文本）。**SPEC 优先级表里不再有未实现的 P0**。release run 见下方 |
+| 0.3.0 | 2026-10-10 | `v0.3.0` | `TASK-018` + `P-07` / `P-08` / `P-09` / `P-10`：引用缓存、本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、**blob 只读预览**（图片对比 / 字节预览 / 按版本看文本）。**SPEC 优先级表里不再有未实现的 P0**。tag 打在 `cfc20a9`；release run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4），全部 `--locked` 构建通过 ⇒ `Cargo.lock` 与版本号同步 |
 | 0.2.0 | 2026-10-09 | `v0.2.0` | 首次实际发布：`004` + `005` 批次（变更分析、外部集成、发布硬化、本地 AI 摘要层、MCP 扩展、虚拟滚动）。`release.yml` 首跑 **Status Success**（9m 2s，12 个 job 腿全部完成） |
 | 0.1.0 | — | — | **从未发布**：`CHANGELOG.md` 保留了这一段的开发记录，但没有打过 tag，也没有产出过安装包 |
 
 > 首个可下载版本是 v0.2.0。0.1.0 的条目仅作历史记录，不要用它去对 Release 页面。
 >
-> v0.2.0 的 draft release 需人工点发布才会对外可见；**draft 只有有写权限的人能看到**，
-> 所以「11 个附件是否齐全」这一步无法由外部核验，必须登录后在 Releases 页面确认。
+> v0.2.0 与 v0.3.0 的 draft release 都需人工点发布才会对外可见；
+> **draft 只有有写权限的人能看到**，所以「11 个附件是否齐全」这一步无法由外部核验
+> （`v0.3.0` 已实测：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0，
+> 与 v0.2.0 记录的情况一致），必须登录后在 Releases 页面确认。
+>
+> **v0.2.0 的 draft 至今仍未人工点发布**（截至 2026-10-10）。v0.3.0 会再产生一个 draft，
+> 两个都在 Releases 页面等着。
 
 ## 已知缺口
 
@@ -140,6 +145,7 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 |------|------|
 | 无代码签名 | 用户安装时看到系统警告 |
 | draft 附件清单无法从外部核验 | draft release 只有有写权限的人可见，仓库外的人（包括匿名 API）看不到附件列表 |
-| GitHub Actions 的 Node 20 弃用告警 | `v0.2.0` 首跑报出 12 条 warning：`actions/checkout@v4` / `actions/setup-node@v4` / `pnpm/action-setup@v4` / `softprops/action-gh-release@v2` 仍面向 Node 20、被强制跑到 Node 24。**升版前必须先确认各 action 的新版本号存在**，盲升会当场打断发布链路 |
+| **`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26** | `v0.3.0` 的 run 38017284575 报出这条 notice（每个 ubuntu job 一条）。本次发布仍在 Ubuntu 24 上完成；**2026-10-19 之后的第一次发布会换基础镜像**，Linux 安装包（AppImage / deb）需重新人工验一遍。另有 macOS arm64 runner 的排队变长提示，只影响耗时 |
+| GitHub Actions 的 Node 20 弃用告警 | `v0.2.0` 与 `v0.3.0` 两次跑都报出 **12 条** warning（同样的几个 action）：`actions/checkout@v4` / `actions/setup-node@v4` / `pnpm/action-setup@v4` / `softprops/action-gh-release@v2` 仍面向 Node 20、被强制跑到 Node 24。**升版前必须先确认各 action 的新版本号存在**，盲升会当场打断发布链路 |
 | 无自动更新（updater） | 用户需手动下载新版本 |
 | `productName` 仍是 `repoprism-app` | 安装包与窗口标题显示的是这个旧名，与产品名 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，一直没擅自改 |

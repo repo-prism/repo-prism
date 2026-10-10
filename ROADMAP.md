@@ -55,6 +55,8 @@
 | `006` | — | 发布 v0.2.0（tag `v0.2.0`） | ✅ 2026-10-09 |
 | v0.3 | [TASK-017](TASKS/017-git-read-perf.md) | Git 读取层性能：减 spawn（原定「`gix` 后端」，经 [`ADR-002`](ADR/002-git-backend-evolution.md) 改手段） | ✅ 2026-10-09 |
 | v0.3 | [TASK-018](TASKS/018-incremental-cache.md) | 增量加载与本地缓存：引用映射跨调用复用（blame 未做，理由见卡片） | ✅ 2026-10-09 |
+| v0.3 | P-07 / P-08 / P-09 / P-10 | 工程补丁：本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、blob 只读预览 | ✅ 2026-10-10 |
+| v0.3 | — | 发布 v0.3.0（tag `v0.3.0`，打在 `cfc20a9` → release run 38017284575） | ✅ 2026-10-10（draft 待人工点发布） |
 | v0.3 | TASK-019–020 | 多仓库 / PR 只读视图 | ⬜ 未开始 |
 
 > **TASK-017 的手段变更**是 v0.3 的第一个决策点。血统里它的主题是「`gix` 后端」，
@@ -97,7 +99,7 @@
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.3.0`（v0.3.0 发版前）。`--expect 0.2.0` 会**真的失败**（退出码 1），已当场复验 |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`f8e9e59`（P-10）→ run **38015706569**，**6 腿全 success**：Read-only Guard（自检 + 扫描）/ Frontend（lint / typecheck / test / build / release:dry）/ Rust×3（fmt / clippy / test 在三平台全 success）/ Performance。`test` 步骤在 macos 02:07:21、ubuntu 02:07:11、windows 02:08:04 都是 success —— **P-10 新增的 `tests/preview.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标），也就是说那 13 项「真的 `git add` 二进制再读回来」的用例不是只在本机绿。<br>上一次：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
-| 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（verify 9s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4） |
+| 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ **最近一次**：tag `v0.3.0`（打在 `cfc20a9`）→ run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4）。cli 与 mcp-binaries 的 8 条腿全部 `cargo build --release --locked` 通过 ⇒ **`Cargo.lock` 与 0.3.0 同步**。产物是 **draft**：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0（与 v0.2.0 同样），**11 个附件是否齐全只能登录后核验**。新观察到一条 notice：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，之后首次发布需重验 Linux 安装包。<br>上一次：tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（12 腿全 success）。<br>**两个 draft 都还没被人工点发布**（v0.2.0 自 2026-10-09、v0.3.0 自 2026-10-10） |
 
 **core 165 项的构成**：lib 67（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
 `parse_head_meta`，以及 P-09 新增的状态探测与列表解析纯函数 **+14**）/ analysis 5 /
@@ -213,14 +215,14 @@ US-1 里那条「worktree / stash / 合并变基状态」在 SPEC 中标 **P0**�
 blob 内容（`FileStat.binary` 只标记不读），所以「只读」这次要从「不执行写命令」
 推进到「读也要先量再读」。做完之后，v0.3 剩下的 P0 一条都没有了。
 
-### 发布收尾（v0.2.0 之后立刻要做）
+### 发布收尾（v0.2.0 / v0.3.0 两个 draft 都卡在这一步）
 
 | 事项 | 说明 |
 |------|------|
-| ~~盯 `release.yml` 首次运行~~ | ✅ 已跑：run 37914120667，Status Success，9m 2s，12 个 job 腿全部完成 |
-| 人工核附件清单 | 预期 11 个（3 桌面 + 4 CLI + 4 MCP）。**draft 不对外可见，匿名访问看不到**，需在 Releases 页面确认 |
-| 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5 |
-| 点发布 | draft 不会自动对外可见 |
+| ~~盯 `release.yml` 首次运行~~ | ✅ 已跑两次：v0.2.0 → run 37914120667（9m 2s，12 腿全 success）；v0.3.0 → run 38017284575（8m 51s，12 腿全 success） |
+| 人工核附件清单 | 每个 draft 预期 11 个（3 桌面 + 4 CLI + 4 MCP）。**draft 不对外可见**，v0.3.0 已实测匿名 API 只拿到「附件数 0」且没有 `name`，需在 Releases 页面确认 |
+| 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5。v0.3.0 另需看一眼**新能力**：状态角标、worktree / stash 列表、点开变更文件看图片 |
+| 点发布 | draft 不会自动对外可见。**两个都还没点**（v0.2.0 / v0.3.0） |
 
 ### 独立待办（需先决条件）
 
@@ -228,8 +230,8 @@ blob 内容（`FileStat.binary` 只标记不读），所以「只读」这次要
 |------|---------|
 | 代码签名与 macOS 公证 | 缺 Apple Developer 证书与 Windows 代码签名证书 |
 | 本地 AI 端到端验证 | 本机未安装 Ollama；需 `ollama serve` + 拉一个模型。**我们这一侧的 HTTP 路径已由 P-07 的 stub 覆盖**，剩下的是「真实 Ollama 的响应形状与我们的假设一致」这半 |
-| 产品命名统一 | `src-tauri/tauri.conf.json` 的 `productName` 仍是 `repoprism-app`，与 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，未擅自改。**v0.2.0 的安装包与窗口标题用的就是这个名字** |
-| 图片 / 字节预览 | 需先定「只读取 blob 字节」的边界（`git cat-file`），并给 diff 定性能阈值 |
+| 产品命名统一 | `src-tauri/tauri.conf.json` 的 `productName` 仍是 `repoprism-app`，与 `RepoPrism` 不一致；`AGENTS.md` 规定命名由人类主导，未擅自改。**v0.2.0 / v0.3.0 两版的安装包与窗口标题用的都是这个名字** |
+| ~~图片 / 字节预览~~ | ✅ P-10 已完成（边界定在 `git cat-file`，先看大小再决定读不读）。剩余「音视频播放」见 SPEC |
 | `commit-graph` 虚拟化的布局耦合 | 虚拟滚动依赖 `.main` / `.main-split` / `.commit-graph` 上的 `min-height: 0`；改这几处布局必须回归虚拟滚动 |
 
 ### 未解决的风险（如实说明）
