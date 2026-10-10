@@ -26,7 +26,7 @@
 
 ```bash
 pnpm release:dry
-# 期望输出：next version: 0.2.0
+# 期望输出：next version: <当前版本号>
 ```
 
 `scripts/check-versions.mjs` 一共查五件事，任何一条不过就以退出码 1 失败并逐条列出原因：
@@ -44,25 +44,31 @@ pnpm release:dry
 ## 2. 更新 CHANGELOG
 
 在 `CHANGELOG.md` 顶部把 `## [Unreleased]` 的内容整理成新版本条目，
-并补上日期（`## [0.2.0] - YYYY-MM-DD`）。
+并补上日期（`## [0.3.0] - YYYY-MM-DD`），同时留下一个空的 `## [Unreleased]` 段落
+（Keep a Changelog 要求这一节始终存在）。
 
 ## 3. 提交并打 tag
 
 ```bash
 git add package.json Cargo.toml Cargo.lock src-tauri/tauri.conf.json CHANGELOG.md
-git commit -m "chore(release): v0.2.0"
+git commit -m "chore(release): v0.3.0"
 git push origin main
 
-git tag -a v0.2.0 -m "RepoPrism v0.2.0"   # 必须是 vX.Y.Z，release workflow 只认这个形状
-git push origin v0.2.0
+git tag -a v0.3.0 -m "RepoPrism v0.3.0"   # 必须是 vX.Y.Z，release workflow 只认这个形状
+git push origin v0.3.0
 ```
+
+> **顺序不能反**：先 push 提交、确认 `main` 上的 CI 全绿，**再**打 tag。
+> tag 触发的 `release.yml` 只读扫描与版本号校验，不会替你跑 Rust / 前端门禁 ——
+> 那些由 `ci.yml` 在**提交**上把关。反过来先把 tag 推出去，
+> 就可能给一个 CI 还没绿的提交产出安装包。
 
 > **`Cargo.lock` 必须在改动清单里**：提版本号会让锁文件里四个成员的版本一起变，
 > 而 `release.yml` 用 `--locked` 构建 CLI / MCP，锁文件过期会直接失败。
 > `pnpm release:dry` 现在会检查这一点（P-06）。
 
 > tag 必须带 `v` 前缀。`release.yml` 里 `--expect-ref` 会自动剥掉 `v` 再比对
-> `package.json` 的 `0.2.0`。
+> `package.json` 里的版本号。
 
 ## 4. CI 自动构建
 
@@ -119,6 +125,7 @@ macOS 会报「无法验证开发者」、Windows 会报 SmartScreen 警告。�
 
 | 版本 | 日期 | tag | 内容 |
 |------|------|-----|------|
+| 0.3.0 | 2026-10-10 | `v0.3.0` | `TASK-018` + `P-07` / `P-08` / `P-09` / `P-10`：引用缓存、本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、**blob 只读预览**（图片对比 / 字节预览 / 按版本看文本）。**SPEC 优先级表里不再有未实现的 P0**。release run 见下方 |
 | 0.2.0 | 2026-10-09 | `v0.2.0` | 首次实际发布：`004` + `005` 批次（变更分析、外部集成、发布硬化、本地 AI 摘要层、MCP 扩展、虚拟滚动）。`release.yml` 首跑 **Status Success**（9m 2s，12 个 job 腿全部完成） |
 | 0.1.0 | — | — | **从未发布**：`CHANGELOG.md` 保留了这一段的开发记录，但没有打过 tag，也没有产出过安装包 |
 

@@ -117,7 +117,7 @@ pnpm release:dry
 （`repoprism-*` / `repoprism-mcp-*`），**全部是 draft release**，需人工确认后发布。
 当前**不做代码签名**（macOS 未公证、Windows 未签名），安装时会有系统警告 —— 这是已知情况。
 
-当前版本 **0.2.0**，发布历史见 [`docs/RELEASE.md`](docs/RELEASE.md)，
+当前版本 **0.3.0**，发布历史见 [`docs/RELEASE.md`](docs/RELEASE.md)，
 版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 文档地图
