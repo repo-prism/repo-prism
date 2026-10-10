@@ -232,6 +232,19 @@ fn build_contract() -> String {
     text
 }
 
+/// 抹掉行尾差异再比对。
+///
+/// Windows runner 的默认 `autocrlf` 会在 checkout 时把这个文件从 LF 转成 CRLF，
+/// 而 `serde_json` 生成的永远是 LF —— 逐字节比对会红，还会假装是「形状变了」，
+/// 把人引到完全错误的方向上去（**P-12 在 `0705e46` 上真实发生过**，
+/// macos / ubuntu 全绿、只有 windows 那条腿红）。
+///
+/// 根由由仓库根的 `.gitattributes` 治（`contracts/** text eol=lf`），
+/// 这里是第二道防线：不是所有环境都读那份配置（子模块、归档解包、`git archive`…）。
+fn normalize_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n")
+}
+
 #[test]
 fn the_wire_contract_file_matches_the_serde_shape() {
     let path = contract_path();
@@ -241,7 +254,8 @@ fn the_wire_contract_file_matches_the_serde_shape() {
     });
 
     assert_eq!(
-        actual, expected,
+        normalize_newlines(&actual),
+        expected,
         "\n\ncontract 文件与 serde 的当前形状不一致。\n\
          这通常意味着你改了 `BlobPreview` / `BlobKind` 的序列化（字段名、rename_all、\n\
          新增或删除字段），但还没有把新形状同步到前端。\n\n\

@@ -1,0 +1,8 @@
+# contract 文件是**逐字节比对**的（P-12）：Windows runner 的 `autocrlf`
+# 会在 checkout 时把 LF 转成 CRLF，而 Rust 侧 `serde_json::to_string_pretty`
+# 生成的永远是 LF —— 两边一比就红，还要假报「形状变了」。
+#
+# 这里强制 checkout 成 LF，从源头掐掉 platform-specific 的行尾差异。
+# `tests/wire_contract.rs` 那边另有一层归一化，两道防线互为备份：
+# 只要有一处没生效，另一处还能拦住。
+contracts/** text eol=lf
