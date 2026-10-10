@@ -100,6 +100,9 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      # 前端 invoke 的字符串与后端 generate_handler! 的名单：两边没有编译期联系，
+      # 只改一边会全绿到用户点下按钮那一刻才炸。UI 接线层没有别的自动化覆盖。
+      - run: pnpm check:commands
       # 类型检查与单测都过了，不代表产物能构建出来
       - run: pnpm build
       # 版本号在三处独立声明（package.json / workspace Cargo.toml / tauri.conf.json）。

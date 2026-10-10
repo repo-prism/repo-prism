@@ -7,9 +7,10 @@
 //! （AGENTS.md 的目录职责表）。因此只读约束与 GUI / CLI 共用同一套实现。
 
 use anyhow::Result;
-use repo_prism_core::{ChangeAnalysis, Git, LineStats};
+use repo_prism_core::{ChangeAnalysis, Git, LineStats, RepoSet};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, OnceLock};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "repoprism-mcp";
@@ -17,6 +18,19 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `commits` 工具的单次上限，与 CLI 的 `--limit` 保持一致。
 const MAX_LIMIT: usize = 2000;
+
+/// 跨请求复用的仓库会话表（TASK-019 / US-9）。
+///
+/// MCP 是被客户端拉起后**长期驻留**的进程，而此前每个请求都 `Git::open`
+/// —— 每次都要付一次 `rev-parse`，且引用缓存（TASK-018）在请求结束就随实例丢掉。
+///
+/// 失效判据与桌面端**同一套**（引用内容指纹），因此不需要调用方声明「仓库变了」：
+/// 客户端连着问同一个仓库时省掉重复的 `rev-parse`，仓库在两次调用之间被改动时
+/// 缓存会自动失效。表有上限，所以长驻进程的内存不会随「问过的仓库数」无限增长。
+fn sessions() -> &'static RepoSet {
+    static SET: OnceLock<RepoSet> = OnceLock::new();
+    SET.get_or_init(RepoSet::with_default_cap)
+}
 
 fn main() -> Result<()> {
     let stdin = io::stdin();
@@ -219,9 +233,15 @@ fn to_json_text<T: serde::Serialize>(value: T) -> Result<String, RpcError> {
     serde_json::to_string_pretty(&value).map_err(tool_failure)
 }
 
-/// 打开仓库。`Git::open` 失败（例如不是仓库）属参数问题，不是服务端内部错误。
-fn open(path: &str) -> Result<Git, RpcError> {
-    Git::open(path).map_err(|e| RpcError::invalid_params(e.to_string()))
+/// 取仓库会话。`path` 不是仓库属参数问题，不是服务端内部错误。
+///
+/// 返回 `Arc<Git>` 而不是 `Git`：会话表持有同一个实例，请求只是借用它。
+/// 借到的句柄在本次请求结束后即释放，但**表里的那份还在** —— 下一次请求
+/// 命中同一个仓库时就不用再解析一遍仓库布局。
+fn open(path: &str) -> Result<Arc<Git>, RpcError> {
+    sessions()
+        .open(path)
+        .map_err(|e| RpcError::invalid_params(e.to_string()))
 }
 
 /// 工具执行失败。MCP 约定：工具级错误仍返回 `result`，但标记 `isError`。

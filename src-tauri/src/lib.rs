@@ -1,49 +1,28 @@
 use repo_prism_core::{
     build_commit_prompt, BlobPreview, ChangeAnalysis, CommitDetail, CommitInfo, Diff, Git,
-    LineStats, OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSnapshot, Summarizer, WorkspaceInfo,
-    DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS,
+    LineStats, OllamaConfig, OllamaSummarizer, RemoteInfo, RepoSet, RepoSnapshot, Summarizer,
+    WorkspaceInfo, DEFAULT_ENDPOINT, DEFAULT_MODEL, DEFAULT_TIMEOUT_SECS,
 };
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 // ---------------------------------------------------------------------------
 // 只读仓库命令
 // ---------------------------------------------------------------------------
-// TASK-018：所有仓库命令都通过**同一个会话**执行，而不是各自 `Git::open`。
+// TASK-018 让所有命令共用**一个**仓库会话；TASK-019（US-9）把它换成
+// **一张**按已解析仓库根索引的会话表（`RepoSet`），于是可以同时打开多个仓库。
 //
-// 收益来源是一个实测事实：单个命令内部只会读一次引用映射，所以引用缓存的
-// 价值**完全在命令之间**。打开一个仓库要跑四条命令（快照 / 提交 / 分析 / 远端），
-// 其中三条都要引用映射 —— 会话在则整个打开过程只读一次。
+// 收益与 TASK-018 同源：单个命令内部只会读一次引用映射，引用缓存的价值
+// **完全在命令之间**。表现在，则这份收益对每个已打开的仓库各成立一次，
+// 而且切回刚才那个仓库不必重新付一次 `rev-parse`。
 //
-// 代价与边界：会话被一把锁串起来，因此这几条命令不再真正并发（它们本来也是在
-// 争同一批 git 进程）。多仓库工作区是 TASK-019 的范围，这里一次只留一个会话。
+// 边界（都写在 core 的 `sessions` 模块文档里，这里不重复）：
+// - 表**有上限**（默认 8），超出按最久未用淘汰；淘汰只丢缓存，不丢正确性
+// - 命令在表锁之外执行：表只负责交出 `Arc<Git>`，不同仓库的命令因此不互相阻塞
+// - 「关闭」连别名一起清，是真的放掉，不是从界面上隐藏
 
-/// 当前打开的仓库会话。
-///
-/// `requested` 与 `git.path()` 都参与命中判断：前端先拿用户输入的路径调
-/// `inspect_repo`，之后改用返回的 `snapshot.path`（已解析的仓库根）调其余命令。
-/// 只看输入字符串会在这两步之间必然落空一次。
-struct RepoSession {
-    requested: PathBuf,
-    git: Git,
-}
-
-/// 取得（必要时建立）`path` 对应的仓库会话。
-fn session_git<'a>(slot: &'a mut Option<RepoSession>, path: &str) -> Result<&'a Git, String> {
-    let requested = PathBuf::from(path);
-    let hit = slot
-        .as_ref()
-        .is_some_and(|session| session.requested == requested || session.git.path() == requested);
-    if !hit {
-        // 换仓库即整体替换，顺带丢掉上一个仓库的缓存 —— 不做跨仓库共享。
-        let git = Git::open_cached(&requested).map_err(|e| e.to_string())?;
-        *slot = Some(RepoSession { requested, git });
-    }
-    Ok(&slot.as_ref().expect("session was just populated").git)
-}
-
-/// 在仓库会话上执行一次只读读操作。
+/// 在 `path` 所在仓库的会话上执行一次只读读操作。
 ///
 /// 对错误类型泛化，是为了不必为本文件新增一条 `anyhow` 依赖边：
 /// core 的公开方法返回 `anyhow::Result`，而这里只需要 `Display`。
@@ -53,12 +32,28 @@ fn with_git<T, E: std::fmt::Display>(
     path: &str,
     f: impl FnOnce(&Git) -> Result<T, E>,
 ) -> Result<T, String> {
-    let mut slot = state
-        .repo
-        .lock()
-        .map_err(|_| "repo session is unavailable: the lock was poisoned".to_string())?;
-    let git = session_git(&mut slot, path)?;
-    f(git).map_err(|e| e.to_string())
+    let git = state.repos.open(path).map_err(|e| e.to_string())?;
+    f(&git).map_err(|e| e.to_string())
+}
+
+/// 当前打开的仓库根，供界面画切换条。
+///
+/// 只给路径、不给分支名之类要看仓库才知道的字段 —— 那是**另一个子进程**，
+/// 而界面切换条只需要一个名字，路径的最后一段就够了（前端 `repoDisplayName`）。
+#[tauri::command]
+fn list_open_repos(state: State<'_, AppState>) -> Vec<String> {
+    state
+        .repos
+        .roots()
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect()
+}
+
+/// 关掉一个仓库的会话。返回是否确实关掉了一个。
+#[tauri::command]
+fn close_repo(path: String, state: State<'_, AppState>) -> bool {
+    state.repos.close(&path)
 }
 
 #[tauri::command]
@@ -193,15 +188,19 @@ impl Default for AiSettings {
 
 struct AppState {
     ai: Mutex<AiSettings>,
-    /// 当前打开的仓库会话（TASK-018）。见 [`RepoSession`]。
-    repo: Mutex<Option<RepoSession>>,
+    /// 同时打开的仓库会话（TASK-018 建会话，TASK-019 把它变成一张表）。
+    ///
+    /// 用 `Arc` 是因为 Tauri 的托管状态要求 `Send + Sync + 'static`；
+    /// `RepoSet` 自身已经是 `Send + Sync`（内部一把锁），包一层只是为了让
+    /// 命令里拿到的是引用而不是克隆。
+    repos: Arc<RepoSet>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             ai: Mutex::new(load_settings()),
-            repo: Mutex::new(None),
+            repos: Arc::new(RepoSet::with_default_cap()),
         }
     }
 }
@@ -327,6 +326,8 @@ pub fn run() {
             get_remote_info,
             get_workspace,
             get_blob_preview,
+            list_open_repos,
+            close_repo,
             get_ai_settings,
             set_ai_settings,
             test_ai_connection,

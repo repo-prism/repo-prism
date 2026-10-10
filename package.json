@@ -13,6 +13,7 @@
     "lint:fix": "biome check --write src",
     "format": "biome format --write src",
     "test": "vitest run",
+    "check:commands": "node scripts/check-invoke-names.mjs",
     "release:dry": "node scripts/check-versions.mjs",
     "release:verify": "node scripts/check-versions.mjs --expect-ref"
   },

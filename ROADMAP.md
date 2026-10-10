@@ -57,7 +57,8 @@
 | v0.3 | [TASK-018](TASKS/018-incremental-cache.md) | 增量加载与本地缓存：引用映射跨调用复用（blame 未做，理由见卡片） | ✅ 2026-10-09 |
 | v0.3 | P-07 / P-08 / P-09 / P-10 | 工程补丁：本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、blob 只读预览 | ✅ 2026-10-10 |
 | v0.3 | — | 发布 v0.3.0（tag `v0.3.0`，打在 `cfc20a9` → release run 38017284575） | ✅ 2026-10-10（draft 待人工点发布） |
-| v0.3 | TASK-019–020 | 多仓库 / PR 只读视图 | ⬜ 未开始 |
+| v0.3 | [TASK-019](TASKS/019-multi-repo.md) | 多仓库工作区：会话表 + 切换条 + MCP 长驻复用 | ✅ 2026-10-10 |
+| v0.3 | TASK-020 | PR / MR 只读视图 | ⬜ 未开始 |
 
 > **TASK-017 的手段变更**是 v0.3 的第一个决策点。血统里它的主题是「`gix` 后端」，
 > `ADR-002` 实测后否决了换后端，改为在同一后端里合并子进程；**目标（大仓库首屏性能）未变**，
@@ -87,25 +88,31 @@
 | 只读扫描 | `bash scripts/read-only-guard.sh` | ✅ passed |
 | Rust 格式 | `cargo fmt --all -- --check` | ✅ 干净 |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ 无警告 |
-| Rust 测试 | `cargo test --workspace` | ✅ **193 passed**（core 165 / CLI 14 / MCP 14）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故按包跑后加总 |
+| Rust 测试 | `cargo test --workspace` | ✅ **213 passed**（core 183 / CLI 14 / MCP 16）。⚠️ `cargo test --workspace` 在本机沙箱会被 OOM kill（exit 137），故按包跑后加总 |
 | 子进程次数（`ADR-002`） | `cargo test -p repo-prism-core --test perf` | ✅ `spawn_counts_are_pinned`：`snapshot()` 2 次、`snapshot()+commits()` 4 次（原 5 / 7）。**该门禁在 TASK-018 与 P-09 里都一字未改** —— 缓存是 opt-in、状态探测是文件探测，两条都不给快照加子进程，见下 |
 | 引用缓存失效（`TASK-018`） | `cargo test -p repo-prism-core --test cache` | ✅ **12 passed**：1 条「缓存确实命中」+ 7 条「引用一变必须失效」+ 4 条边界（工作区状态从不缓存 / 不开启时行为不变 / 链接工作树 / 分支改名）。失败路径由 6 个探针反证 |
 | 工作区状态与列表（P-09） | `cargo test -p repo-prism-core --test workspace` | ✅ **11 passed**：真实 git 造出冲突合并 / 变基（含进度）/ 摘取 / 回退 / 二分 / 链接工作树 / stash，逐项断言。另含 lib 内 14 条纯函数单测（`state_from_markers` / `parse_worktrees` / `parse_stashes`）。Rust 侧 9 条 + 前端侧 4 条失败路径探针全部反证通过 |
 | 性能门禁 | `cargo test -p repo-prism-core --test perf` | ✅ snapshot 224ms / 500ms、commits 121ms / 800ms |
-| 前端 lint | `biome check src` | ✅ 34 files |
+| 前端 lint | `biome check src` | ✅ 37 files |
 | 前端类型 | `tsc --noEmit` | ✅ 无错误 |
-| 前端测试 | `vitest run` | ✅ 71 passed（7 files；新增 `workspace.test.ts` 14 条、`preview.test.ts` 16 条） |
-| 前端构建 | `vite build` | ✅ `dist/assets/index-BRbENeDd.js` 251.04 kB（gzip 78.39 kB） |
+| 前端测试 | `vitest run` | ✅ 84 passed（8 files；`workspace.test.ts` 14 / `preview.test.ts` 16 / `repo.test.ts` 16） |
+| 前端构建 | `vite build` | ✅ `dist/assets/index-B0YoM7yn.js` 252.72 kB（gzip 78.91 kB） |
+| 命令名一致性 | `pnpm check:commands` | ✅ 前端 `invoke` 16 个 ↔ 后端 `generate_handler!` 16 个。失败路径已实测（改名即 rc=1） |
 | 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.3.0`（v0.3.0 发版前）。`--expect 0.2.0` 会**真的失败**（退出码 1），已当场复验 |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`f8e9e59`（P-10）→ run **38015706569**，**6 腿全 success**：Read-only Guard（自检 + 扫描）/ Frontend（lint / typecheck / test / build / release:dry）/ Rust×3（fmt / clippy / test 在三平台全 success）/ Performance。`test` 步骤在 macos 02:07:21、ubuntu 02:07:11、windows 02:08:04 都是 success —— **P-10 新增的 `tests/preview.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标），也就是说那 13 项「真的 `git add` 二进制再读回来」的用例不是只在本机绿。<br>上一次：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ **最近一次**：tag `v0.3.0`（打在 `cfc20a9`）→ run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4）。cli 与 mcp-binaries 的 8 条腿全部 `cargo build --release --locked` 通过 ⇒ **`Cargo.lock` 与 0.3.0 同步**。产物是 **draft**：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0（与 v0.2.0 同样），**11 个附件是否齐全只能登录后核验**。新观察到一条 notice：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，之后首次发布需重验 Linux 安装包。<br>上一次：tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（12 腿全 success）。<br>**两个 draft 都还没被人工点发布**（v0.2.0 自 2026-10-09、v0.3.0 自 2026-10-10） |
 
-**core 165 项的构成**：lib 67（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
-`parse_head_meta`，以及 P-09 新增的状态探测与列表解析纯函数 **+14**）/ analysis 5 /
+**core 183 项的构成**：lib 70（含 `summarizer` 13、`analysis` 16、`git` 的 remote/hash 解析、
+`parse_head_meta`，P-09 新增的状态探测与列表解析纯函数 +14，
+P-10 的类型判据与转储 +11，TASK-019 的 `RepoSet` 边界 +3）/ analysis 5 /
 diff 10 / perf 2 / remote 5 / snapshot 16 / `summarizer_http` 8（P-07）/
 `summarizer_egress` 1 + `summarizer_contract` 4（P-08）/ `cache` 12（TASK-018）/
-**`workspace` 11（P-09）/ `preview` 13（P-10）**，另有 lib 内纯函数 +11（P-10 的类型判据与转储）。
+`workspace` 11（P-09）/ `preview` 13（P-10）/ **`sessions` 15（TASK-019）**。
+
+**TASK-019 的 spawn 契约**：`snapshot()` 首次 2 次、之后 1 次（会话是 `open_cached` 的）；
+「恰好 2 次」那条**与状态无关**的契约由 `perf.rs` 用**不缓存**的 `Git::open` 钉住。
+`tests/sessions.rs` 断言的是另一件事：**缓存是每个仓库一份**，读 B 不会把 A 的缓存顶掉。
 
 **性能门禁的采样方式**：预热一次 + 采样 3 次取**最小值**。
 
@@ -173,7 +180,7 @@ CI runner 无此问题，故未改项目配置。
 | US-6 MCP Server（5 个只读工具） | ✅ 已实现 |
 | US-7 AI 变更摘要 | ✅ 已实现（本地 10 条规则 + 可选本地模型层，默认关闭）<br>⚠️ 模型层的真实调用未端到端验证（本机无 Ollama） |
 | US-8 一键跳转集成 | ✅ 已实现 |
-| US-9 多仓库工作区 | ❌ 未实现（TASK-019） |
+| US-9 多仓库工作区 | ✅ 已实现（TASK-019） |
 | US-10 PR/MR 只读视图 | ❌ 未实现（TASK-020） |
 
 ---
@@ -199,9 +206,12 @@ tag `v0.2.0` 已推送。**v0.1.0 从未打过 tag**，所以 v0.2.0 是第一�
    交付范围与**未做的部分**（blame 是尚未实现的产品能力；提交详情缓存因失效判据
    暂不可证而留待）见 [`TASKS/018`](TASKS/018-incremental-cache.md)。
    缓存刻意做成 **opt-in**（`Git::open_cached`），以保住那条「与状态无关」的 spawn 门禁。
-3. **TASK-019 多仓库工作区**（US-9）。当前 `AppState` 只保留一个 `RepoSession`，
-   多仓库需要把会话换成按路径索引的表 —— 缓存的失效判据可以原样复用。
-4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界
+3. ~~**TASK-019 多仓库工作区**（US-9）~~ ✅ 已完成（2026-10-10）：`AppState` 换成
+   `Arc<RepoSet>`，键是**已解析的仓库根**、输入别名另记，上限 8 个按最久未用淘汰，
+   命令在表锁之外执行；MCP 长驻进程复用同一张表。
+4. **TASK-020 PR / MR 只读视图**（US-10）—— 需要网络与凭据，须先定「只读但不本地」的边界。
+   **这是 SPEC 里最后一张 P2 卡**：做完之后 US-1~US-10 全部 `[已实现]`（US-3 的音视频播放与
+   US-7 的真实模型验证另算，前者是刻意留的、后者卡在环境）
 
 补丁序列在 TASK-018 之后又补了一张 [P-09](TASKS/patch/P-09-worktree-stash-state.md)：
 US-1 里那条「worktree / stash / 合并变基状态」在 SPEC 中标 **P0**，却**从未被分配卡号**

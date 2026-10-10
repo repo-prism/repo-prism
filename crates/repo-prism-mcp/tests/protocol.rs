@@ -425,6 +425,137 @@ fn missing_argument_is_an_invalid_params_error() {
 }
 
 #[test]
+fn one_process_can_serve_two_repositories() {
+    // TASK-019（US-9）：会话表现在是**一张**，同一个长驻进程可以服务多个仓库。
+    let left = TempRepo::new("two-left");
+    left.write("a.txt", "1\n");
+    left.commit("c1");
+
+    let right = TempRepo::new("two-right");
+    right.write("b.txt", "2\n");
+    right.commit("c1");
+    right.git(&["checkout", "-b", "release"]);
+
+    let responses = serve(&format!(
+        "{}\n{}\n",
+        call_tool(
+            1,
+            "repoprism_inspect",
+            serde_json::json!({ "path": left.path_str() })
+        ),
+        call_tool(
+            2,
+            "repoprism_inspect",
+            serde_json::json!({ "path": right.path_str() })
+        )
+    ));
+
+    assert_eq!(responses.len(), 2);
+    let left_data = content_json(&responses[0]);
+    let right_data = content_json(&responses[1]);
+
+    assert_eq!(left_data["head"]["branch"], "main");
+    assert_eq!(right_data["head"]["branch"], "release");
+    assert_ne!(
+        left_data["path"], right_data["path"],
+        "两个仓库的快照不该互相污染"
+    );
+}
+
+/// 长驻进程的**交互式**会话：写完不关 stdin，于是可以在两次调用之间改动仓库。
+///
+/// 这是 TASK-019 在 MCP 侧唯一真正的新风险。此前每个请求都新开一个**不缓存**的
+/// `Git`，所以「两次调用之间仓库变了」根本不会发生；现在会话被复用，
+/// 引用映射留在内存里 —— 它必须能自己失效，否则 Agent 会读到过时的分支列表。
+struct Server {
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    child: std::process::Child,
+}
+
+impl Server {
+    fn start() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_repoprism-mcp"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn repoprism-mcp");
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = std::io::BufReader::new(child.stdout.take().expect("stdout piped"));
+        Self {
+            stdin,
+            stdout,
+            child,
+        }
+    }
+
+    /// 发一条请求，读一条响应。
+    ///
+    /// 服务端每条响应都是**一行**且在写完后立即 flush，因此 `read_line` 不会
+    /// 多读也不会读不满。若服务端崩了，`read_line` 返回 0 字节 —— 那会被断言拦下，
+    /// 而不是让测试挂住。
+    fn call(&mut self, line: &str) -> serde_json::Value {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "{line}").expect("write request");
+        self.stdin.flush().expect("flush request");
+        let mut buf = String::new();
+        let read = self.stdout.read_line(&mut buf).expect("read response");
+        assert!(read > 0, "服务端没有回包，可能已经退出");
+        serde_json::from_str(&buf).unwrap_or_else(|e| panic!("响应必须是合法 JSON：{buf}（{e}）"))
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // 关掉 stdin 让服务端自己读到 EOF 退出；万一它卡住，再强杀一次。
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn a_reused_session_still_sees_a_branch_created_between_calls() {
+    let repo = TempRepo::new("stale-refs");
+    repo.write("a.txt", "1\n");
+    repo.commit("c1");
+
+    let mut server = Server::start();
+    let inspect = call_tool(
+        1,
+        "repoprism_inspect",
+        serde_json::json!({ "path": repo.path_str() }),
+    );
+
+    // 第一次：缓存被填上，此时只有 main
+    let first = content_json(&server.call(&inspect));
+    let names_before: Vec<&str> = first["branches"]
+        .as_array()
+        .expect("branches 应为数组")
+        .iter()
+        .filter_map(|b| b["name"].as_str())
+        .collect();
+    assert_eq!(names_before, vec!["main"]);
+
+    // 两次调用之间，仓库被外部改了：多出一个分支
+    repo.git(&["branch", "feature"]);
+
+    // 第二次：复用的会话**必须**看得见它。若引用缓存不会失效，这里会少一个分支。
+    let second = content_json(&server.call(&inspect));
+    let names_after: Vec<&str> = second["branches"]
+        .as_array()
+        .expect("branches 应为数组")
+        .iter()
+        .filter_map(|b| b["name"].as_str())
+        .collect();
+    assert!(
+        names_after.contains(&"feature"),
+        "复用的会话读到了过时的引用：{names_after:?}"
+    );
+    assert_eq!(names_after.len(), 2);
+}
+
+#[test]
 fn non_repository_path_is_reported_as_invalid_params() {
     let dir = std::env::temp_dir().join(format!("repoprism-mcp-notrepo-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("failed to create temp dir");

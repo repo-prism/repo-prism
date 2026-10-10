@@ -95,6 +95,68 @@ body,
   opacity: 0.5;
   cursor: wait;
 }
+/* 刷新是次要动作：不能和「打开」争视觉重量 */
+.refresh-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+.refresh-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* 仓库切换条（US-9 / TASK-019） */
+.repo-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 0 20px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.repo-tab {
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+}
+.repo-tab.active {
+  background: var(--bg);
+  border-color: var(--border);
+}
+.repo-tab-select {
+  padding: 7px 2px 7px 12px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.repo-tab.active .repo-tab-select {
+  color: var(--text);
+  font-weight: 600;
+}
+.repo-tab-close {
+  padding: 7px 10px 7px 6px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.repo-tab-close:hover {
+  color: var(--danger);
+}
 
 .error-banner {
   padding: 10px 20px;
