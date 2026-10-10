@@ -58,7 +58,10 @@
 | v0.3 | P-07 / P-08 / P-09 / P-10 | 工程补丁：本地模型出网边界的真实覆盖、worktree / stash / 进行中状态、blob 只读预览 | ✅ 2026-10-10 |
 | v0.3 | — | 发布 v0.3.0（tag `v0.3.0`，打在 `cfc20a9` → release run 38017284575） | ✅ 2026-10-10（draft 待人工点发布） |
 | v0.3 | [TASK-019](TASKS/019-multi-repo.md) | 多仓库工作区：会话表 + 切换条 + MCP 长驻复用 | ✅ 2026-10-10 |
-| v0.3 | TASK-020 | PR / MR 只读视图 | ⬜ 未开始 |
+| v0.3 | P-11 | 工程补丁：blob 只读预览接进 CLI 与 MCP（新增 CLI `blob` 子命令 + MCP 第 6 个工具），并裁决 `open --view` | ✅ 2026-10-10 |
+| v0.3 | [ADR-003](ADR/003-pr-view-egress-boundary.md) | PR/MR 视图的出网与凭据边界（**状态：提案**，待批准） | ✅ 2026-10-10 |
+| v0.4 | — | 发布 v0.4.0（tag `v0.4.0`，打在 `<sha>` → release run `<run>`） | 🔄 进行中（draft 待人工点发布） |
+| v0.3 | TASK-020 | PR / MR 只读视图 | ⬜ 未开始（等 `ADR/003` 的 A/B/C 选项被批准） |
 
 > **TASK-017 的手段变更**是 v0.3 的第一个决策点。血统里它的主题是「`gix` 后端」，
 > `ADR-002` 实测后否决了换后端，改为在同一后端里合并子进程；**目标（大仓库首屏性能）未变**，
@@ -100,7 +103,7 @@
 | 前端测试 | `vitest run` | ✅ 84 passed（8 files；`workspace.test.ts` 14 / `preview.test.ts` 16 / `repo.test.ts` 16） |
 | 前端构建 | `vite build` | ✅ `dist/assets/index-B0YoM7yn.js` 252.72 kB（gzip 78.91 kB） |
 | 命令名一致性 | `pnpm check:commands` | ✅ 前端 `invoke` 16 个 ↔ 后端 `generate_handler!` 16 个。失败路径已实测（改名即 rc=1） |
-| 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.3.0`（v0.3.0 发版前）。`--expect 0.2.0` 会**真的失败**（退出码 1），已当场复验 |
+| 版本一致性 | `pnpm release:dry` | ✅ `next version: 0.4.0`（v0.4.0 发版前）。两条失败路径都当场复验：`--expect 0.3.0` → rc=1、`--expect-ref refs/tags/v0.3.0` → rc=1；正向 `--expect-ref refs/tags/v0.4.0` → rc=0 |
 | Workflow YAML | `yaml.safe_load` 解析 `ci.yml` / `release.yml` | ✅ 可解析，依赖顺序符合预期 |
 | 远端 CI（真实执行） | GitHub Actions 的 `CI` workflow | ✅ **最近一次**：`7ffaa9b`（P-11）→ run **38027927882**，**6 腿全 success**（墙钟约 2m05s，最长腿 windows-latest 2m02s）。三平台 `test` 步全 success ⇒ **P-11 新增的 `crates/repo-prism-cli/tests/blob.rs`（8 项）、`tests/preview.rs` 的 4 项线格式测试与 MCP 的 5 项 blob 用例在 macos / ubuntu / windows 上都真跑过**（`cargo test --workspace` 不筛目标）。<br>上一次：`f485c20`（TASK-019）→ run **38021645850**，**6 腿全 success**。三平台 `test` 步全 success ⇒ **TASK-019 新增的 `tests/sessions.rs`（15 项）与 MCP 的两个新用例在 macos / ubuntu / windows 上都真跑过**。新增的 `pnpm check:commands` 步骤（前端 job，第 9 步）也是 success —— 这条新闸门在 CI 上确实执行了，不是只在本地绿。<br>上一次：`f8e9e59`（P-10）→ run **38015706569**，**6 腿全 success**：Read-only Guard（自检 + 扫描）/ Frontend（lint / typecheck / test / build / release:dry）/ Rust×3（fmt / clippy / test 在三平台全 success）/ Performance。`test` 步骤在 macos 02:07:21、ubuntu 02:07:11、windows 02:08:04 都是 success —— **P-10 新增的 `tests/preview.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标），也就是说那 13 项「真的 `git add` 二进制再读回来」的用例不是只在本机绿。<br>上一次：`49c7a87`（P-09）→ run 37942003269，**6 腿全 success**；`test` 步骤在 macos / ubuntu / windows 三条腿都是 success —— **P-09 新增的 `tests/workspace.rs` 因此在三个平台上都真跑过**（`cargo test --workspace` 不筛目标）。上一版 `9564c67`（TASK-018 文档）→ run 37935852725 亦全绿。<br>**新的 `tests/cache.rs` 确实在 CI 上跑过**：`cargo test --workspace` 不筛目标，本地已确认它把 `tests/cache.rs` 编成可执行文件（`Executable tests/cache.rs`）；若该目标失败，这一步会红。CI 日志需 admin 才能读（匿名 403），故这是**基于构建产物的验证**，不是日志级验证。<br>**修复后连续 9 次全绿**：`99478ea`（run 37912380547）起，至 `eb570c3`（run 37928197958），每次 6 腿全 success。<br>**截至 `eb570c3`**：仓库累计 **14 次**运行 = 修复前 **5 次全失败**（最早 `cad2d96`）+ 修复后 **9 次全成功**。<br>这三个数**锚定在 `eb570c3` 这个提交上**，不是「当前值」——后续每次提交都会让它增长，所以不写「截至目前共 N 次」这种会漂的说法。重算：`curl -s "https://api.github.com/repos/repo-prism/repo-prism/actions/runs?per_page=30&event=push"` 后按 `name == "CI"` 过滤。<br>（本行此前写的「四次」「五次」是**少算**——手数时漏掉了两次文档提交的运行。） |
 | 远端发布（真实执行） | GitHub Actions 的 `Release` workflow | ✅ **最近一次**：tag `v0.3.0`（打在 `cfc20a9`）→ run **38017284575**，**Status Success，8m 51s**，**12 个 job 腿全部 success**（verify 10s / desktop 3-of-3 / cli 4-of-4 / mcp-binaries 4-of-4）。cli 与 mcp-binaries 的 8 条腿全部 `cargo build --release --locked` 通过 ⇒ **`Cargo.lock` 与 0.3.0 同步**。产物是 **draft**：匿名 API 查 `/releases/tags/v0.3.0` 拿不到 `name`、附件数为 0（与 v0.2.0 同样），**11 个附件是否齐全只能登录后核验**。新观察到一条 notice：`ubuntu-latest` 将于 2026-10-19 迁移到 Ubuntu 26，之后首次发布需重验 Linux 安装包。<br>上一次：tag `v0.2.0` → run 37914120667，**Status Success，9m 2s**（12 腿全 success）。<br>**两个 draft 都还没被人工点发布**（v0.2.0 自 2026-10-09、v0.3.0 自 2026-10-10） |
@@ -241,14 +244,18 @@ blob 内容（`FileStat.binary` 只标记不读），所以「只读」这次要
 而三处消费者拿到的都是 JSON。同一张卡还裁决了 `repoprism open --view`：
 不实现，但把三条前置条件写进 SPEC，而不是让它继续看起来像「忘了」。
 
-### 发布收尾（v0.2.0 / v0.3.0 两个 draft 都卡在这一步）
+### 发布收尾（v0.2.0 / v0.3.0 / v0.4.0 三个 draft 都卡在这一步）
 
 | 事项 | 说明 |
 |------|------|
-| ~~盯 `release.yml` 首次运行~~ | ✅ 已跑两次：v0.2.0 → run 37914120667（9m 2s，12 腿全 success）；v0.3.0 → run 38017284575（8m 51s，12 腿全 success） |
+| ~~盯 `release.yml` 首次运行~~ | ✅ 已跑三次：v0.2.0 → run 37914120667（9m 2s，12 腿全 success）；v0.3.0 → run 38017284575（8m 51s，12 腿全 success）；v0.4.0 → run `<run>` |
 | 人工核附件清单 | 每个 draft 预期 11 个（3 桌面 + 4 CLI + 4 MCP）。**draft 不对外可见**，v0.3.0 已实测匿名 API 只拿到「附件数 0」且没有 `name`，需在 Releases 页面确认 |
-| 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5。v0.3.0 另需看一眼**新能力**：状态角标、worktree / stash 列表、点开变更文件看图片 |
-| 点发布 | draft 不会自动对外可见。**两个都还没点**（v0.2.0 / v0.3.0） |
+| 人工验收 draft release | 三平台安装包各装一遍；CLI 与 MCP 各下一个跑通；详见 `docs/RELEASE.md` §5。<br>v0.3.0 另需看一眼**新能力**：状态角标、worktree / stash 列表、点开变更文件看图片。<br>v0.4.0 另需看一眼：多仓库切换条（同时开两个仓库、点标签切、点 × 关）、CLI 的 `repoprism blob`、MCP `tools/list` 应列出 **6 个**工具 |
+| 点发布 | draft 不会自动对外可见。**三个都还没点**（v0.2.0 / v0.3.0 / v0.4.0） |
+
+> **连续发版而 draft 从未发布，会让「发版」退化成仪式**：每次打 tag 只增加一个
+> 没人能下载的草稿。v0.4.0 之后应先由人工把三个 draft 处理掉
+> （要么点发布、要么删掉被 newer 版本取代的），再考虑下一个版本。
 
 ### 独立待办（需先决条件）
 
