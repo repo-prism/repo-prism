@@ -1,0 +1,119 @@
+{
+  "_": {
+    "readme": "本文件由 cargo test -p repo-prism-core --test wire_contract -- --ignored 生成，请勿手改。它是 Rust 的 serde 形状与 TypeScript 侧类型之间的唯一事实来源。",
+    "rust_type": "repo_prism_core::WorkspaceInfo",
+    "ts_type": "src/lib/workspaceInfo.ts"
+  },
+  "samples": [
+    {
+      "name": "full",
+      "value": {
+        "stashes": [
+          {
+            "commit": "5d6e7f8",
+            "message": "WIP on main: 1a2b3c4 subject",
+            "reference": "stash@{0}"
+          }
+        ],
+        "worktrees": [
+          {
+            "bare": false,
+            "branch": "main",
+            "commit": "1a2b3c4",
+            "detached": false,
+            "is_main": true,
+            "locked": false,
+            "path": "/repo"
+          }
+        ]
+      }
+    },
+    {
+      "name": "empty",
+      "value": {
+        "stashes": [],
+        "worktrees": []
+      }
+    },
+    {
+      "name": "detached_worktree",
+      "value": {
+        "stashes": [
+          {
+            "commit": "5d6e7f8",
+            "message": "WIP on main: 1a2b3c4 subject",
+            "reference": "stash@{0}"
+          }
+        ],
+        "worktrees": [
+          {
+            "bare": false,
+            "branch": null,
+            "commit": "1a2b3c4",
+            "detached": true,
+            "is_main": true,
+            "locked": false,
+            "path": "/repo"
+          }
+        ]
+      }
+    }
+  ],
+  "shape": {
+    "enums": {},
+    "fields": [
+      "stashes",
+      "worktrees"
+    ],
+    "nullable": [],
+    "shapes": {
+      "stashes": {
+        "enums": {},
+        "fields": [
+          "commit",
+          "message",
+          "reference"
+        ],
+        "nullable": [],
+        "shapes": {},
+        "types": {
+          "commit": "string",
+          "message": "string",
+          "reference": "string"
+        },
+        "unions": {}
+      },
+      "worktrees": {
+        "enums": {},
+        "fields": [
+          "bare",
+          "branch",
+          "commit",
+          "detached",
+          "is_main",
+          "locked",
+          "path"
+        ],
+        "nullable": [
+          "branch"
+        ],
+        "shapes": {},
+        "types": {
+          "bare": "boolean",
+          "branch": "string",
+          "commit": "string",
+          "detached": "boolean",
+          "is_main": "boolean",
+          "locked": "boolean",
+          "path": "string"
+        },
+        "unions": {}
+      }
+    },
+    "types": {
+      "stashes": "array",
+      "worktrees": "array"
+    },
+    "unions": {}
+  }
+}

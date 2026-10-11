@@ -1,56 +1,40 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ChangeAnalysis } from "./analysis";
+import { parseChangeAnalysis } from "./analysis";
+import type { BlobPreview } from "./blobPreview";
+import { parseBlobPreview } from "./blobPreview";
+import type { ChangeKind, RepoSnapshot } from "./snapshot";
+import { parseRepoSnapshot } from "./snapshot";
+import type { WorkspaceInfo } from "./workspaceInfo";
+import { parseWorkspaceInfo } from "./workspaceInfo";
 
-export type ChangeKind =
-  | "added"
-  | "modified"
-  | "deleted"
-  | "renamed"
-  | "copied"
-  | "type_changed"
-  | "unmerged"
-  | "unknown";
+// ---------------------------------------------------------------------------
+// 受管模型（补丁 P-13）
+//
+// 下面这些类型的 JSON 形状由 Rust 的 serde 决定，受 `contracts/*.json` 与
+// `src/lib/wireContract.ts` 管制，因此住在各自的文件里。这里 re-export 只为
+// 让调用方的 import 路径不变 —— **不要**往这个清单里加手抄的类型定义。
+// ---------------------------------------------------------------------------
 
-export interface UpstreamInfo {
-  name: string;
-  ahead: number;
-  behind: number;
-}
-export interface HeadInfo {
-  branch: string | null;
-  commit: string;
-  detached: boolean;
-  upstream: UpstreamInfo | null;
-}
-export interface BranchInfo {
-  name: string;
-  commit: string;
-  is_current: boolean;
-}
-export interface TagInfo {
-  name: string;
-  commit: string;
-}
-export interface FileChange {
-  path: string;
-  kind: ChangeKind;
-}
-export interface StatusInfo {
-  conflicts: FileChange[];
-  staged: FileChange[];
-  unstaged: FileChange[];
-}
-export interface RepoSnapshot {
-  path: string;
-  head: HeadInfo;
-  branches: BranchInfo[];
-  tags: TagInfo[];
-  status: StatusInfo;
-  /**
-   * 进行中的操作（US-1）。**没有**进行中的操作时是 `null`，
-   * 而不是某个表示「干净」的取值 —— 与 `head.upstream` 的 `null` 同构。
-   */
-  state: RepoState | null;
-}
+export type {
+  ChangeAnalysis,
+  Risk,
+  RiskCounts,
+  RiskLevel,
+} from "./analysis";
+export type {
+  BranchInfo,
+  ChangeKind,
+  FileChange,
+  HeadInfo,
+  RepoSnapshot,
+  RepoState,
+  StatusInfo,
+  TagInfo,
+  UpstreamInfo,
+} from "./snapshot";
+export type { StashInfo, WorkspaceInfo, WorktreeInfo } from "./workspaceInfo";
+
 export interface CommitInfo {
   sha: string;
   short_sha: string;
@@ -133,39 +117,6 @@ export interface CommitDetail {
 // 快照里；`worktrees` / `stashes` 要起进程，所以单独走 getWorkspace()。
 // ---------------------------------------------------------------------------
 
-/** 仓库正在进行的操作。判据与降级规则见 SPEC 的 US-1。 */
-export type RepoState =
-  | { kind: "merge" }
-  | { kind: "rebase"; step: number | null; total: number | null }
-  | { kind: "cherry_pick" }
-  | { kind: "revert" }
-  | { kind: "bisect" };
-
-export interface WorktreeInfo {
-  path: string;
-  /** 该工作树检出的分支短名；分离头指针时为 `null`。 */
-  branch: string | null;
-  /** 该工作树的 HEAD。bare / 空仓库时为空串。 */
-  commit: string;
-  /** 主工作树。git 保证它排在第一条。 */
-  is_main: boolean;
-  bare: boolean;
-  detached: boolean;
-  locked: boolean;
-}
-
-export interface StashInfo {
-  /** `stash@{0}` 形式的引用。 */
-  reference: string;
-  commit: string;
-  message: string;
-}
-
-export interface WorkspaceInfo {
-  worktrees: WorktreeInfo[];
-  stashes: StashInfo[];
-}
-
 /**
  * 工作树与 stash 列表。
  *
@@ -173,7 +124,8 @@ export interface WorkspaceInfo {
  * 契约。因此**只在界面上真正需要时才调它**。
  */
 export async function getWorkspace(path: string): Promise<WorkspaceInfo> {
-  return invoke<WorkspaceInfo>("get_workspace", { path });
+  const wire = await invoke<unknown>("get_workspace", { path });
+  return parseWorkspaceInfo(wire);
 }
 
 // ---------------------------------------------------------------------------
@@ -192,14 +144,8 @@ export type {
   BlobPreview,
   ImageFormat,
 } from "./blobPreview";
-export {
-  MAX_PREVIEW_BYTES,
-  parseBlobPreview,
-  WireContractError,
-} from "./blobPreview";
-
-import type { BlobPreview } from "./blobPreview";
-import { parseBlobPreview } from "./blobPreview";
+export { MAX_PREVIEW_BYTES, parseBlobPreview } from "./blobPreview";
+export { WireContractError } from "./wireContract";
 
 /**
  * 取一个文件在某个版本的内容预览。
@@ -217,7 +163,8 @@ export async function getBlobPreview(
 }
 
 export async function inspectRepo(path: string): Promise<RepoSnapshot> {
-  return invoke<RepoSnapshot>("inspect_repo", { path });
+  const wire = await invoke<unknown>("inspect_repo", { path });
+  return parseRepoSnapshot(wire);
 }
 
 export async function getCommits(path: string, limit = 200, skip = 0): Promise<CommitInfo[]> {
@@ -241,31 +188,10 @@ export async function getDiff(path: string, from?: string, to?: string): Promise
 // 变更分析与风险标记（US-7 的本地部分）
 // ---------------------------------------------------------------------------
 
-export type RiskLevel = "info" | "warn" | "critical";
-
-export interface Risk {
-  rule_id: string;
-  level: RiskLevel;
-  message: string;
-  path: string;
-}
-
-export interface RiskCounts {
-  info: number;
-  warn: number;
-  critical: number;
-}
-
-export interface ChangeAnalysis {
-  summary: string;
-  total_files: number;
-  risks: Risk[];
-  by_level: RiskCounts;
-}
-
 /** 未提交改动的本地风险分析。纯本地，不调用任何外部 API。 */
 export async function analyzeChanges(path: string): Promise<ChangeAnalysis> {
-  return invoke<ChangeAnalysis>("analyze_changes", { path });
+  const wire = await invoke<unknown>("analyze_changes", { path });
+  return parseChangeAnalysis(wire);
 }
 
 // ---------------------------------------------------------------------------

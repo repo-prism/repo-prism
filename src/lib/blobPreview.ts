@@ -1,5 +1,6 @@
 /**
- * `BlobPreview` 的 TypeScript 侧类型，以及**跨语言线格式契约**（补丁 P-12）。
+ * `BlobPreview` 的 TypeScript 侧类型，以及**跨语言线格式契约**（补丁 P-12，
+ * P-13 起改用通用解析器）。
  *
  * # 这些类型为什么搬出 `api.ts`
  *
@@ -10,54 +11,40 @@
  *
  * 现在 `contracts/blob-preview.json` 是唯一事实来源：它由 Rust 侧生成
  * （`cargo test -p repo-prism-core --test wire_contract -- --ignored`），
- * 由 `blobPreview.test.ts` 与下面这些清单逐项比对。
+ * 由 `wire.test.ts` 与下面这些键表逐项比对。
  *
- * # 下面这些常量不是注释，是运行时判据
+ * # 手抄的只有三样
  *
- * `BLOB_PREVIEW_FIELDS` / `BLOB_KIND_PROPS` / `IMAGE_FORMATS` 被
- * `parseBlobPreview` 真拿来校验每一条进来的 JSON，所以清单与解析器
- * 不可能各自漂移 —— 写在这里一份，两端都用。
+ * 1. **字段名**（`fieldsOf` —— 漏一个或多一个都是编译错误）
+ * 2. **枚举取值**（`ImageFormat` / kind 的 tag —— 编译器检查）
+ * 3. **`MAX_PREVIEW_BYTES`**（见下面它自己的注释，那里解释了为什么**故意**
+ *    不从 contract 派生）
+ *
+ * 形状本身（哪个字段是数组、哪个可为空、嵌套长什么样）从 contract 读，
+ * 再由 `parseWire` 真拿来校验每一条进来的 JSON。
  */
+
+import contractJson from "../../contracts/blob-preview.json";
+import { fieldsOf, type KeyMap, parseWire, type VariantSpec, type WireShape } from "./wireContract";
+
+const contract = contractJson as unknown as {
+  shape: WireShape;
+  constants: { max_preview_bytes: number };
+};
 
 export type ImageFormat = "png" | "jpeg" | "gif" | "webp" | "bmp" | "svg";
 
-/** `ImageFormat` 在线上的取值。新增一种格式时 Rust 侧会先让 contract 文件变化。 */
-export const IMAGE_FORMATS = ["png", "jpeg", "gif", "webp", "bmp", "svg"] as const;
-
-/** kind 的判别式在线上的取值。`rename_all = "snake_case"` 决定了它是蛇形。 */
-export const BLOB_KIND_TAGS = ["image", "text", "binary", "lfs_pointer", "too_large"] as const;
-
-export type BlobKindTag = (typeof BLOB_KIND_TAGS)[number];
-
-/**
- * 顶层字段。**与 Rust 的声明顺序无关**（`serde_json::Value::Object` 是字母序），
- * 这里也按字典序排，比对时集合相等即可。
- */
-export const BLOB_PREVIEW_FIELDS = [
-  "content",
-  "hex",
-  "kind",
-  "size",
-  "text",
-  "too_large",
-  "truncated",
-] as const;
-
-/** 每种 kind 在线上的全部字段，含判别式 `kind` 本身。 */
-export const BLOB_KIND_PROPS: Record<BlobKindTag, readonly string[]> = {
-  image: ["format", "kind"],
-  text: ["kind"],
-  binary: ["kind"],
-  lfs_pointer: ["kind", "oid", "size"],
-  too_large: ["kind"],
+const IMAGE_FORMAT_MAP: KeyMap<ImageFormat> = {
+  png: true,
+  jpeg: true,
+  gif: true,
+  webp: true,
+  bmp: true,
+  svg: true,
 };
 
-/**
- * 读取上限。**必须与 Rust 的 `MAX_PREVIEW_BYTES` 一致** ——
- * 界面上那句「超过 X MiB 的预览上限」用的是它。
- * 这条一致性由 `blobPreview.test.ts` 对着 contract 文件断言，不靠人记着改两处。
- */
-export const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
+/** `ImageFormat` 在线上的取值。 */
+export const IMAGE_FORMATS: readonly string[] = fieldsOf(IMAGE_FORMAT_MAP);
 
 /** 用可辨识联合，`switch` 漏掉一类会在类型层面报错。 */
 export type BlobKind =
@@ -66,6 +53,35 @@ export type BlobKind =
   | { kind: "binary" }
   | { kind: "lfs_pointer"; oid: string; size: number }
   | { kind: "too_large" };
+
+/**
+ * 每种 kind 的字段清单（含判别式 `kind` 本身）。
+ *
+ * `Extract<BlobKind, { kind: "…" }>` 让编译器检查它：变体加字段而这里没跟上
+ * ⇒ 编译错误。
+ */
+export const BLOB_KIND_VARIANTS: Record<string, VariantSpec> = {
+  image: {
+    fields: fieldsOf<Extract<BlobKind, { kind: "image" }>>({ kind: true, format: true }),
+    // `format` 只在 image 这个变体里出现，所以挂在变体上而不是顶层形状。
+    enums: { format: IMAGE_FORMATS },
+  },
+  text: { fields: fieldsOf<Extract<BlobKind, { kind: "text" }>>({ kind: true }) },
+  binary: { fields: fieldsOf<Extract<BlobKind, { kind: "binary" }>>({ kind: true }) },
+  lfs_pointer: {
+    fields: fieldsOf<Extract<BlobKind, { kind: "lfs_pointer" }>>({
+      kind: true,
+      oid: true,
+      size: true,
+    }),
+  },
+  too_large: { fields: fieldsOf<Extract<BlobKind, { kind: "too_large" }>>({ kind: true }) },
+};
+
+/** kind 的判别式在线上的取值。`rename_all = "snake_case"` 决定了它是蛇形。 */
+export const BLOB_KIND_TAGS: readonly string[] = Object.keys(BLOB_KIND_VARIANTS).sort();
+
+export type BlobKindTag = Extract<BlobKind, { kind: string }>["kind"];
 
 export interface BlobPreview {
   /** 仓库里该文件的**真实**字节数。永远给出，即使内容一个字节都没读。 */
@@ -83,86 +99,27 @@ export interface BlobPreview {
   too_large: boolean;
 }
 
-/**
- * 后端返回的东西与本文件声明的类型不一致。
- *
- * 这是**契约破了**，不是「读取失败」：把它当成一次普通的 IO 错误重试没有意义，
- * 所以单独一个类型。`getBlobPreview` 的调用方会把它的文案显示给用户 ——
- * 与其静默显示一块空白，不如直说哪里不对。
- */
-export class WireContractError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "WireContractError";
-  }
-}
-
-function typeName(value: unknown): string {
-  if (value === null) return "null";
-  if (Array.isArray(value)) return "数组";
-  return typeof value;
-}
-
-function asObject(value: unknown, where: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new WireContractError(`${where} 应是一个 JSON 对象，实际是 ${typeName(value)}`);
-  }
-  return value as Record<string, unknown>;
-}
+/** 顶层字段清单。**与 Rust 的声明顺序无关**，两边比对时都排序。 */
+export const BLOB_PREVIEW_FIELDS: readonly string[] = fieldsOf<BlobPreview>({
+  size: true,
+  kind: true,
+  content: true,
+  text: true,
+  hex: true,
+  truncated: true,
+  too_large: true,
+});
 
 /**
- * 字段集合必须**精确**相等：少了说明 Rust 那边删了字段，
- * 多了说明 Rust 那边加了字段而前端还没跟上。
+ * 读取上限。**故意不从 contract 派生**。
  *
- * 两个方向都要管 —— 「多一个」恰恰是最容易静默过去的那一个。
+ * 若写成 `contract.constants.max_preview_bytes`，那「TS 的上限 == Rust 的上限」
+ * 就变成一个**永真**的断言 —— Rust 改了上限，TS 自动跟着改，测试永远不会红，
+ * 界面文案也就悄悄变了（探针 F7 就是这么把原来那条断言绕过去的）。
+ *
+ * 这里必须是**另一个独立的数**，测试才比得出「两者一致」。
  */
-function requireExactShape(
-  obj: Record<string, unknown>,
-  allowed: readonly string[],
-  where: string,
-): void {
-  const missing = allowed.filter((key) => !(key in obj));
-  if (missing.length > 0) {
-    throw new WireContractError(`${where} 缺少字段：${missing.join(" / ")}`);
-  }
-  const extra = Object.keys(obj).filter((key) => !(allowed as readonly string[]).includes(key));
-  if (extra.length > 0) {
-    throw new WireContractError(
-      `${where} 出现未知字段：${extra.join(" / ")} —— 后端加了前端还不认识的字段，` +
-        `多半是 contract 文件还没同步（见 src/lib/blobPreview.ts 顶部说明）`,
-    );
-  }
-}
-
-function requireNumber(value: unknown, where: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new WireContractError(`${where} 应是数字，实际是 ${typeName(value)}`);
-  }
-  return value;
-}
-
-function requireBoolean(value: unknown, where: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new WireContractError(`${where} 应是布尔值，实际是 ${typeName(value)}`);
-  }
-  return value;
-}
-
-function requireNullableString(value: unknown, where: string): string | null {
-  if (value === null) return null;
-  if (typeof value !== "string") {
-    throw new WireContractError(`${where} 应是字符串或 null，实际是 ${typeName(value)}`);
-  }
-  return value;
-}
-
-function isBlobKindTag(value: string): value is BlobKindTag {
-  return (BLOB_KIND_TAGS as readonly string[]).includes(value);
-}
-
-function isImageFormat(value: string): value is ImageFormat {
-  return (IMAGE_FORMATS as readonly string[]).includes(value);
-}
+export const MAX_PREVIEW_BYTES = 4 * 1024 * 1024;
 
 /**
  * 把后端返回的 JSON 解析成 `BlobPreview`，**严格校验收到的每一条字段**。
@@ -174,51 +131,5 @@ function isImageFormat(value: string): value is ImageFormat {
  * 静默显示一块空白更难排查。
  */
 export function parseBlobPreview(value: unknown): BlobPreview {
-  const obj = asObject(value, "BlobPreview");
-  requireExactShape(obj, BLOB_PREVIEW_FIELDS, "BlobPreview");
-
-  const kindObj = asObject(obj.kind, "BlobPreview.kind");
-  const tag = kindObj.kind;
-  if (typeof tag !== "string" || !isBlobKindTag(tag)) {
-    throw new WireContractError(`未知的 BlobPreview.kind：${String(tag)}`);
-  }
-  requireExactShape(kindObj, BLOB_KIND_PROPS[tag], `BlobPreview.kind（${tag}）`);
-
-  let kind: BlobKind;
-  switch (tag) {
-    case "image": {
-      const format = kindObj.format;
-      if (typeof format !== "string" || !isImageFormat(format)) {
-        throw new WireContractError(`未知的图片格式：${String(format)}`);
-      }
-      kind = { kind: "image", format };
-      break;
-    }
-    case "lfs_pointer":
-      kind = {
-        kind: "lfs_pointer",
-        oid: requireNullableString(kindObj.oid, "BlobPreview.kind.oid") ?? "",
-        size: requireNumber(kindObj.size, "BlobPreview.kind.size"),
-      };
-      break;
-    case "text":
-      kind = { kind: "text" };
-      break;
-    case "binary":
-      kind = { kind: "binary" };
-      break;
-    case "too_large":
-      kind = { kind: "too_large" };
-      break;
-  }
-
-  return {
-    size: requireNumber(obj.size, "BlobPreview.size"),
-    kind,
-    content: requireNullableString(obj.content, "BlobPreview.content"),
-    text: requireNullableString(obj.text, "BlobPreview.text"),
-    hex: requireNullableString(obj.hex, "BlobPreview.hex"),
-    truncated: requireBoolean(obj.truncated, "BlobPreview.truncated"),
-    too_large: requireBoolean(obj.too_large, "BlobPreview.too_large"),
-  };
+  return parseWire<BlobPreview>(contract.shape, value, "BlobPreview");
 }

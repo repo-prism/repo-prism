@@ -1,0 +1,101 @@
+{
+  "_": {
+    "readme": "本文件由 cargo test -p repo-prism-core --test wire_contract -- --ignored 生成，请勿手改。它是 Rust 的 serde 形状与 TypeScript 侧类型之间的唯一事实来源。",
+    "rust_type": "repo_prism_core::ChangeAnalysis",
+    "ts_type": "src/lib/analysis.ts"
+  },
+  "samples": [
+    {
+      "name": "full",
+      "value": {
+        "by_level": {
+          "critical": 3,
+          "info": 1,
+          "warn": 2
+        },
+        "risks": [
+          {
+            "level": "critical",
+            "message": "删除了 420 行",
+            "path": "src/legacy.rs",
+            "rule_id": "large-deletion"
+          }
+        ],
+        "summary": "3 个文件有未提交改动",
+        "total_files": 3
+      }
+    },
+    {
+      "name": "empty",
+      "value": {
+        "by_level": {
+          "critical": 0,
+          "info": 0,
+          "warn": 0
+        },
+        "risks": [],
+        "summary": "",
+        "total_files": 0
+      }
+    }
+  ],
+  "shape": {
+    "enums": {},
+    "fields": [
+      "by_level",
+      "risks",
+      "summary",
+      "total_files"
+    ],
+    "nullable": [],
+    "shapes": {
+      "by_level": {
+        "enums": {},
+        "fields": [
+          "critical",
+          "info",
+          "warn"
+        ],
+        "nullable": [],
+        "shapes": {},
+        "types": {
+          "critical": "number",
+          "info": "number",
+          "warn": "number"
+        },
+        "unions": {}
+      },
+      "risks": {
+        "enums": {
+          "level": [
+            "critical",
+            "info",
+            "warn"
+          ]
+        },
+        "fields": [
+          "level",
+          "message",
+          "path",
+          "rule_id"
+        ],
+        "nullable": [],
+        "shapes": {},
+        "types": {
+          "level": "string",
+          "message": "string",
+          "path": "string",
+          "rule_id": "string"
+        },
+        "unions": {}
+      }
+    },
+    "types": {
+      "by_level": "object",
+      "risks": "array",
+      "summary": "string",
+      "total_files": "number"
+    },
+    "unions": {}
+  }
+}

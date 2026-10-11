@@ -8,20 +8,38 @@
 
 ### Added
 
-- **跨语言线格式闸门**（工程补丁 P-12）
-  - `BlobPreview` 的 JSON 是三处消费者的共同契约（桌面端 / CLI / MCP），而前端
-    `src/lib/api.ts` 里那份类型是**手抄**的 —— 双方没有编译期联系。P-11 补的 Rust 侧
-    线格式测试拦得住「Rust 序列化成什么」，拦不住「前端那份已经跟 Rust 分叉了」
-  - 现在有一份唯一事实来源 `contracts/blob-preview.json`：由 Rust 侧生成，
-    由 `src/lib/blobPreview.test.ts` 逐项比对。改任意一侧，另一侧会红
-  - 更新 contract 文件需要明确执行一条 `--ignored` 的 Rust 用例 —— **CI 不会替你更新**
-  - 顺手修掉一处真实分叉：界面上那句「超过 4 MiB」此前是硬编码的，与 Rust 的
-    `MAX_PREVIEW_BYTES` 是两个独立的数。现在由同一个值派生
-- **严格解析器 `parseBlobPreview`**：`getBlobPreview` 的必经路径。契约破时抛
-  `WireContractError`，面板把它显示成一行提示，而不是静默渲染出一块空白。
-  那条字段清单不是注释，是运行时判据 —— 注释会过时，代码不会
+- **跨语言线格式闸门**（工程补丁 P-12 建立，P-13 推广到全部受管模型）
+  - 这些模型的 JSON 是三处消费者的共同契约（桌面端 / CLI / MCP），而前端
+    `src/lib/*.ts` 里那份类型是**手抄**的 —— 双方没有任何编译期联系。
+    P-11 补的 Rust 侧线格式测试拦得住「Rust 序列化成什么」，拦不住
+    「前端那份已经跟 Rust 分叉了」
+  - 唯一事实来源是 `contracts/*.json`：由 Rust 侧（serde）生成，由 TypeScript 侧
+    逐项比对。受管模型现在有四个：`RepoSnapshot`（首屏）/ `WorkspaceInfo` /
+    `ChangeAnalysis` / `BlobPreview`
+  - 更新 contract 文件需要明确执行一条 `--ignored` 的 Rust 用例 ——
+    **CI 不会替你更新**（与 `tests/scale.rs` 的诊断基准同一个约定）
+  - P-13 把它从「为一个模型手写」变成「一套机制」：字段集合、每个字段的 JSON
+    类型、可空性、嵌套形状、数组元素形状全部由**样本推导** —— 新增一个受管模型
+    是加数据，不是再抄一遍生成器与解析器
+  - 可空性不写在清单里，而是**把该字段换成 `null` 再问 serde 能不能反序列化**：
+    「Rust 把 `String` 改成 `Option<String>`」会自动改变 contract，不用人记得同步
+- **三个首屏入口都过严格解析**：`inspectRepo` / `getWorkspace` / `analyzeChanges`
+  会把后端返回的东西按 contract 校验一遍，不符就抛 `WireContractError`
+  （三个调用点都有 `catch`，显示成一行提示，而不是静默渲染出一块空白）
 - **即使只有字段集合对了但某处的数字是另抄的，现在也会红**：界面上那句「超过 4 MiB」
   此前与 Rust 的 `MAX_PREVIEW_BYTES` 是两个独立的数，改一个另一个不会跟着变
+
+### Known gaps（这条闸门管不到的，写在明处）
+
+- **枚举的「全部取值」只能手写清单**（serde 没有运行时反射）：给 `ChangeKind`
+  加一个变体而 Rust 侧的取值清单没同步 ⇒ contract 不变、测试**不红**。
+  tagged union 的**新增变体**同理
+- 但 union **字段**有启发式兜底：某个对象字段含 `kind` 键却没登记为 union，
+  生成 contract 时会直接 panic 提示去登记 —— 免得它静默退化成普通对象
+- **字段的 TypeScript 类型**（`string` 还是 `number`）仍是手抄的：contract 只校验
+  JSON 类型。改了会在运行时被拒（不静默），但不会在编译期红
+- contract 文件会被打进前端产物（运行时判据必须在运行时可用）。四个文件合计
+  约 12 kB，产物由 255 kB 增至 267 kB（gzip +3 kB）
 
 ## [0.4.0] - 2026-10-10
 

@@ -1,0 +1,686 @@
+{
+  "_": {
+    "readme": "本文件由 cargo test -p repo-prism-core --test wire_contract -- --ignored 生成，请勿手改。它是 Rust 的 serde 形状与 TypeScript 侧类型之间的唯一事实来源。",
+    "rust_type": "repo_prism_core::RepoSnapshot",
+    "ts_type": "src/lib/snapshot.ts"
+  },
+  "samples": [
+    {
+      "expect_tag": "rebase",
+      "name": "full",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "rebase",
+          "step": 3,
+          "total": 7
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "name": "clean",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": null,
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "expect_tag": "merge",
+      "name": "merge",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "merge"
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "expect_tag": "cherry_pick",
+      "name": "cherry_pick",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "cherry_pick"
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "expect_tag": "revert",
+      "name": "revert",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "revert"
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "expect_tag": "bisect",
+      "name": "bisect",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "bisect"
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "expect_tag": "rebase",
+      "name": "rebase_without_progress",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": "main",
+          "commit": "1a2b3c4",
+          "detached": false,
+          "upstream": {
+            "ahead": 1,
+            "behind": 2,
+            "name": "origin/main"
+          }
+        },
+        "path": "/repo",
+        "state": {
+          "kind": "rebase",
+          "step": null,
+          "total": null
+        },
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    },
+    {
+      "name": "detached",
+      "value": {
+        "branches": [
+          {
+            "commit": "1a2b3c4",
+            "is_current": true,
+            "name": "main"
+          }
+        ],
+        "head": {
+          "branch": null,
+          "commit": "1a2b3c4",
+          "detached": true,
+          "upstream": null
+        },
+        "path": "/repo",
+        "state": null,
+        "status": {
+          "conflicts": [
+            {
+              "kind": "unmerged",
+              "path": "conflicted.txt"
+            }
+          ],
+          "staged": [
+            {
+              "kind": "added",
+              "path": "staged.txt"
+            }
+          ],
+          "unstaged": [
+            {
+              "kind": "modified",
+              "path": "unstaged.txt"
+            }
+          ]
+        },
+        "tags": [
+          {
+            "commit": "1a2b3c4",
+            "name": "v0.1.0"
+          }
+        ]
+      }
+    }
+  ],
+  "shape": {
+    "enums": {},
+    "fields": [
+      "branches",
+      "head",
+      "path",
+      "state",
+      "status",
+      "tags"
+    ],
+    "nullable": [
+      "state"
+    ],
+    "shapes": {
+      "branches": {
+        "enums": {},
+        "fields": [
+          "commit",
+          "is_current",
+          "name"
+        ],
+        "nullable": [],
+        "shapes": {},
+        "types": {
+          "commit": "string",
+          "is_current": "boolean",
+          "name": "string"
+        },
+        "unions": {}
+      },
+      "head": {
+        "enums": {},
+        "fields": [
+          "branch",
+          "commit",
+          "detached",
+          "upstream"
+        ],
+        "nullable": [
+          "branch",
+          "upstream"
+        ],
+        "shapes": {
+          "upstream": {
+            "enums": {},
+            "fields": [
+              "ahead",
+              "behind",
+              "name"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "ahead": "number",
+              "behind": "number",
+              "name": "string"
+            },
+            "unions": {}
+          }
+        },
+        "types": {
+          "branch": "string",
+          "commit": "string",
+          "detached": "boolean",
+          "upstream": "object"
+        },
+        "unions": {}
+      },
+      "status": {
+        "enums": {},
+        "fields": [
+          "conflicts",
+          "staged",
+          "unstaged"
+        ],
+        "nullable": [],
+        "shapes": {
+          "conflicts": {
+            "enums": {
+              "kind": [
+                "added",
+                "copied",
+                "deleted",
+                "modified",
+                "renamed",
+                "type_changed",
+                "unknown",
+                "unmerged"
+              ]
+            },
+            "fields": [
+              "kind",
+              "path"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string",
+              "path": "string"
+            },
+            "unions": {}
+          },
+          "staged": {
+            "enums": {
+              "kind": [
+                "added",
+                "copied",
+                "deleted",
+                "modified",
+                "renamed",
+                "type_changed",
+                "unknown",
+                "unmerged"
+              ]
+            },
+            "fields": [
+              "kind",
+              "path"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string",
+              "path": "string"
+            },
+            "unions": {}
+          },
+          "unstaged": {
+            "enums": {
+              "kind": [
+                "added",
+                "copied",
+                "deleted",
+                "modified",
+                "renamed",
+                "type_changed",
+                "unknown",
+                "unmerged"
+              ]
+            },
+            "fields": [
+              "kind",
+              "path"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string",
+              "path": "string"
+            },
+            "unions": {}
+          }
+        },
+        "types": {
+          "conflicts": "array",
+          "staged": "array",
+          "unstaged": "array"
+        },
+        "unions": {}
+      },
+      "tags": {
+        "enums": {},
+        "fields": [
+          "commit",
+          "name"
+        ],
+        "nullable": [],
+        "shapes": {},
+        "types": {
+          "commit": "string",
+          "name": "string"
+        },
+        "unions": {}
+      }
+    },
+    "types": {
+      "branches": "array",
+      "head": "object",
+      "path": "string",
+      "state": "object",
+      "status": "object",
+      "tags": "array"
+    },
+    "unions": {
+      "state": {
+        "tag": "kind",
+        "variants": {
+          "bisect": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "cherry_pick": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "merge": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "rebase": {
+            "enums": {},
+            "fields": [
+              "kind",
+              "step",
+              "total"
+            ],
+            "nullable": [
+              "step",
+              "total"
+            ],
+            "shapes": {},
+            "types": {
+              "kind": "string",
+              "step": "number",
+              "total": "number"
+            },
+            "unions": {}
+          },
+          "revert": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          }
+        }
+      }
+    }
+  },
+  "union_tag_path": "state.kind"
+}

@@ -4,54 +4,9 @@
     "rust_type": "repo_prism_core::BlobPreview",
     "ts_type": "src/lib/blobPreview.ts"
   },
-  "fields": [
-    "content",
-    "hex",
-    "kind",
-    "size",
-    "text",
-    "too_large",
-    "truncated"
-  ],
-  "image_formats": [
-    "png",
-    "jpeg",
-    "gif",
-    "webp",
-    "bmp",
-    "svg"
-  ],
-  "kinds": {
-    "binary": {
-      "props": [
-        "kind"
-      ]
-    },
-    "image": {
-      "props": [
-        "format",
-        "kind"
-      ]
-    },
-    "lfs_pointer": {
-      "props": [
-        "kind",
-        "oid",
-        "size"
-      ]
-    },
-    "text": {
-      "props": [
-        "kind"
-      ]
-    },
-    "too_large": {
-      "props": [
-        "kind"
-      ]
-    }
+  "constants": {
+    "max_preview_bytes": 4194304
   },
-  "max_preview_bytes": 4194304,
   "samples": [
     {
       "expect_tag": "image",
@@ -162,5 +117,115 @@
         "truncated": false
       }
     }
-  ]
+  ],
+  "shape": {
+    "enums": {},
+    "fields": [
+      "content",
+      "hex",
+      "kind",
+      "size",
+      "text",
+      "too_large",
+      "truncated"
+    ],
+    "nullable": [
+      "content",
+      "hex",
+      "text"
+    ],
+    "shapes": {},
+    "types": {
+      "content": "string",
+      "hex": "string",
+      "kind": "object",
+      "size": "number",
+      "text": "string",
+      "too_large": "boolean",
+      "truncated": "boolean"
+    },
+    "unions": {
+      "kind": {
+        "tag": "kind",
+        "variants": {
+          "binary": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "image": {
+            "enums": {
+              "format": [
+                "bmp",
+                "gif",
+                "jpeg",
+                "png",
+                "svg",
+                "webp"
+              ]
+            },
+            "fields": [
+              "format",
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "format": "string",
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "lfs_pointer": {
+            "enums": {},
+            "fields": [
+              "kind",
+              "oid",
+              "size"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string",
+              "oid": "string",
+              "size": "number"
+            },
+            "unions": {}
+          },
+          "text": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          },
+          "too_large": {
+            "enums": {},
+            "fields": [
+              "kind"
+            ],
+            "nullable": [],
+            "shapes": {},
+            "types": {
+              "kind": "string"
+            },
+            "unions": {}
+          }
+        }
+      }
+    }
+  },
+  "union_tag_path": "kind.kind"
 }
